@@ -1,0 +1,39 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Soundwave Arc 1 (Top Wave) -->
+    <path
+        android:pathData="M 28,18 A 38,38 0 0 1 80,18"
+        android:strokeColor="#00E5FF"
+        android:strokeWidth="6.5"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+
+    <!-- Soundwave Arc 2 (Middle Wave) -->
+    <path
+        android:pathData="M 38,28 A 24,24 0 0 1 70,28"
+        android:strokeColor="#1DE9B6"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+
+    <!-- Book Left Page (Stretched Darker Accent Shade) -->
+    <path
+        android:pathData="M 54,80 C 42,76 30,76 18,80 L 18,38 C 30,34 42,34 54,38 Z"
+        android:fillColor="#2196F3" />
+
+    <!-- Book Right Page (High Contrast Primary Blue) -->
+    <path
+        android:pathData="M 54,80 C 66,76 78,76 90,80 L 90,34 C 78,30 66,30 54,34 Z"
+        android:fillColor="#00E5FF" />
+
+    <!-- Center Book Binding Spine Line -->
+    <path
+        android:pathData="M 54,34 L 54,80"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round" />
+</vector>

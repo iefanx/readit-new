@@ -1,0 +1,6 @@
+{
+  "name": "AuraBook",
+  "description": "On-device AI text-to-speech audio book converter and offline document reader.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
