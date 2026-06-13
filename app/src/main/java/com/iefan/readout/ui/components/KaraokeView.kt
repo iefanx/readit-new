@@ -22,7 +22,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.snapshotFlow
 import com.iefan.readout.tts.SpeechSentence
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 @Composable
@@ -50,25 +52,27 @@ fun KaraokeView(
     }
 
     // Smooth scroll to keep the active sentence centered in the viewport
-    LaunchedEffect(activeSentenceIndex, textLayoutResult, viewportHeightPx) {
-        val layoutResult = textLayoutResult
-        if (sentences.isNotEmpty() && activeSentenceIndex >= 0 && activeSentenceIndex < sentences.size && layoutResult != null) {
-            val range = sentenceRanges.getOrNull(activeSentenceIndex)
-            if (range != null) {
-                val startOffset = range.first
-                val line = layoutResult.getLineForOffset(startOffset)
-                val lineTop = layoutResult.getLineTop(line)
-                val lineBottom = layoutResult.getLineBottom(line)
-                
-                val targetScroll = if (viewportHeightPx > 0) {
+    LaunchedEffect(activeSentenceIndex) {
+        if (sentences.isNotEmpty() && activeSentenceIndex >= 0 && activeSentenceIndex < sentences.size) {
+            // Wait until layoutResult and viewportHeightPx are measured and ready
+            val layoutResult = snapshotFlow { textLayoutResult }.first { it != null }
+            snapshotFlow { viewportHeightPx }.first { it > 0 }
+            
+            if (layoutResult != null) {
+                val range = sentenceRanges.getOrNull(activeSentenceIndex)
+                if (range != null) {
+                    val startOffset = range.first
+                    val line = layoutResult.getLineForOffset(startOffset)
+                    val lineTop = layoutResult.getLineTop(line)
+                    val lineBottom = layoutResult.getLineBottom(line)
+                    
                     val elementCenter = (lineTop + lineBottom) / 2f
                     val desiredScroll = elementCenter - (viewportHeightPx / 2f)
-                    desiredScroll.coerceIn(0f, (layoutResult.size.height - viewportHeightPx).coerceAtLeast(0).toFloat())
-                } else {
-                    (lineTop - 200f).coerceAtLeast(0f)
-                }
-                
-                coroutineScope.launch {
+                    val targetScroll = desiredScroll.coerceIn(
+                        0f,
+                        (layoutResult.size.height - viewportHeightPx).coerceAtLeast(0).toFloat()
+                    )
+                    
                     scrollState.animateScrollTo(targetScroll.toInt())
                 }
             }
@@ -169,10 +173,10 @@ fun KaraokeView(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .verticalScroll(scrollState)
                     .onGloballyPositioned { coordinates ->
                         viewportHeightPx = coordinates.size.height
                     }
+                    .verticalScroll(scrollState)
                     .padding(start = 24.dp, end = 24.dp, top = 20.dp, bottom = 160.dp) // bottom padding allows scrolling past floating capsule
             ) {
                 Text(
