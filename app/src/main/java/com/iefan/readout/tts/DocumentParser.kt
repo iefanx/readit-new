@@ -19,9 +19,9 @@ object DocumentParser {
         val sentences = mutableListOf<SpeechSentence>()
         if (text.isBlank()) return sentences
 
-        // A simple but robust regex-based sentence boundary detector
-        // Matches periods, question marks, exclamation marks followed by spaces or newlines, or lines
-        val regex = Regex("([^.!?\\n]+[.!?]*\\s*)")
+        // An intelligent regex-based sentence boundary detector that does not split on decimal numbers (e.g. 13.8)
+        // Matches periods only if followed by whitespace or end of string, and question/exclamation marks or newlines
+        val regex = Regex("((?:[^.!?\\n]|\\.(?!\\s|\\$))+[.!?]*\\s*)")
         val matches = regex.findAll(text)
 
         var sentenceIndex = 0

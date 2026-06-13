@@ -1,36 +1,30 @@
 package com.iefan.readout.ui.components
 
-import androidx.compose.animation.*
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Hearing
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.iefan.readout.tts.SpeechSentence
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun KaraokeView(
     sentences: List<SpeechSentence>,
@@ -39,15 +33,44 @@ fun KaraokeView(
     onSentenceJump: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val listState = rememberLazyListState()
+    val scrollState = rememberScrollState()
     val coroutineScope = rememberCoroutineScope()
+    var textLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
+    var viewportHeightPx by remember { mutableStateOf(0) }
 
-    // Smooth scroll to keep active sentence centered in view
-    LaunchedEffect(activeSentenceIndex) {
-        if (sentences.isNotEmpty() && activeSentenceIndex >= 0 && activeSentenceIndex < sentences.size) {
-            coroutineScope.launch {
-                val targetIndex = (activeSentenceIndex - 2).coerceAtLeast(0)
-                listState.animateScrollToItem(targetIndex)
+    // Precompute character offsets of each sentence in the combined document text
+    val sentenceRanges = remember(sentences) {
+        var currentLength = 0
+        sentences.map { sentence ->
+            val start = currentLength
+            val end = start + sentence.text.length
+            currentLength += sentence.text.length + 1 // +1 for the space separator
+            start to end
+        }
+    }
+
+    // Smooth scroll to keep the active sentence centered in the viewport
+    LaunchedEffect(activeSentenceIndex, textLayoutResult, viewportHeightPx) {
+        val layoutResult = textLayoutResult
+        if (sentences.isNotEmpty() && activeSentenceIndex >= 0 && activeSentenceIndex < sentences.size && layoutResult != null) {
+            val range = sentenceRanges.getOrNull(activeSentenceIndex)
+            if (range != null) {
+                val startOffset = range.first
+                val line = layoutResult.getLineForOffset(startOffset)
+                val lineTop = layoutResult.getLineTop(line)
+                val lineBottom = layoutResult.getLineBottom(line)
+                
+                val targetScroll = if (viewportHeightPx > 0) {
+                    val elementCenter = (lineTop + lineBottom) / 2f
+                    val desiredScroll = elementCenter - (viewportHeightPx / 2f)
+                    desiredScroll.coerceIn(0f, (layoutResult.size.height - viewportHeightPx).coerceAtLeast(0).toFloat())
+                } else {
+                    (lineTop - 200f).coerceAtLeast(0f)
+                }
+                
+                coroutineScope.launch {
+                    scrollState.animateScrollTo(targetScroll.toInt())
+                }
             }
         }
     }
@@ -71,134 +94,164 @@ fun KaraokeView(
                 )
             }
         } else {
-            LazyColumn(
-                state = listState,
-                contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 20.dp, bottom = 120.dp), // extra bottom padding for the floating player capsule
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-                modifier = Modifier
-                    .fillMaxSize()
-                    .testTag("karaoke_scroller")
-            ) {
-                itemsIndexed(sentences) { idx, sentence ->
-                    val isActive = idx == activeSentenceIndex
-                    
-                    val annotatedText = remember(sentence, isActive, currentWordRange) {
-                        buildAnnotatedString {
-                            if (isActive && currentWordRange != null) {
-                                val wordStart = currentWordRange.first
-                                val wordEnd = currentWordRange.second
-
-                                var lastIndex = sentence.start
-
-                                // Find valid segments in the sentence words
-                                for (word in sentence.words) {
-                                    // Word overlaps or fully matches the current active range
-                                    if (word.start >= lastIndex) {
-                                        // Append text between last word and this word
-                                        if (word.start > lastIndex) {
-                                            val spaceText = sentence.text.substring(
-                                                (lastIndex - sentence.start).coerceIn(0, sentence.text.length),
-                                                (word.start - sentence.start).coerceIn(0, sentence.text.length)
-                                            )
-                                            append(spaceText)
-                                        }
-
-                                        // Now render word with highlight if within spoken range
-                                        val isWordActivelySpoken = (word.start >= wordStart && word.end <= wordEnd) ||
-                                                                   (wordStart >= word.start && wordStart < word.end)
-                                        
-                                        if (isWordActivelySpoken) {
-                                            withStyle(
-                                                SpanStyle(
-                                                    background = Color(0xFFD0BCFF), // Lavender glowing spotlight
-                                                    color = Color.Black,
-                                                    fontWeight = FontWeight.Bold
+            // Build the single continuous annotated document text
+            val annotatedText = remember(sentences, activeSentenceIndex, currentWordRange, sentenceRanges) {
+                buildAnnotatedString {
+                    sentences.forEachIndexed { idx, sentence ->
+                        val isActive = idx == activeSentenceIndex
+                        
+                        if (isActive) {
+                            // Style for active sentence text (background highlight drawn below in Modifier.drawBehind)
+                            withStyle(
+                                SpanStyle(
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            ) {
+                                if (currentWordRange != null) {
+                                    val wordStart = currentWordRange.first
+                                    val wordEnd = currentWordRange.second
+                                    
+                                    var lastIndex = sentence.start
+                                    
+                                    for (word in sentence.words) {
+                                        if (word.start >= lastIndex) {
+                                            if (word.start > lastIndex) {
+                                                val spaceText = sentence.text.substring(
+                                                    (lastIndex - sentence.start).coerceIn(0, sentence.text.length),
+                                                    (word.start - sentence.start).coerceIn(0, sentence.text.length)
                                                 )
-                                            ) {
+                                                append(spaceText)
+                                            }
+                                            
+                                            val isWordActivelySpoken = (word.start >= wordStart && word.end <= wordEnd) ||
+                                                                       (wordStart >= word.start && wordStart < word.end)
+                                            
+                                            if (isWordActivelySpoken) {
+                                                withStyle(
+                                                    SpanStyle(
+                                                        background = Color(0xFFD0BCFF), // Bright lavender spotlight for the spoken word
+                                                        color = Color.Black,
+                                                        fontWeight = FontWeight.Black
+                                                    )
+                                                ) {
+                                                    append(word.text)
+                                                }
+                                            } else {
                                                 append(word.text)
                                             }
-                                        } else {
-                                            append(word.text)
+                                            lastIndex = word.end
                                         }
-                                        lastIndex = word.end
                                     }
+                                    
+                                    if (lastIndex - sentence.start < sentence.text.length) {
+                                        append(sentence.text.substring(lastIndex - sentence.start))
+                                    }
+                                } else {
+                                    append(sentence.text)
                                 }
-                                
-                                // Append any remaining sentence text
-                                if (lastIndex - sentence.start < sentence.text.length) {
-                                    append(sentence.text.substring(lastIndex - sentence.start))
-                                }
-                            } else {
+                            }
+                        } else {
+                            // Style for inactive text (dimmed)
+                            withStyle(
+                                SpanStyle(
+                                    color = Color.White.copy(alpha = 0.40f)
+                                )
+                            ) {
                                 append(sentence.text)
                             }
                         }
+                        append(" ")
                     }
+                }
+            }
 
-                    // Soft container backing with subtle border (glowing container style from screenshot)
-                    val containerBg = if (isActive) {
-                        Color(0xFF231D3A).copy(alpha = 0.55f) // Traslucent dark purple/blue from Screen 2
-                    } else {
-                        Color.Transparent
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(scrollState)
+                    .onGloballyPositioned { coordinates ->
+                        viewportHeightPx = coordinates.size.height
                     }
-
-                    val containerBorderStroke = if (isActive) {
-                        androidx.compose.foundation.BorderStroke(
-                            width = 1.dp,
-                            color = Color(0xFF9575CD).copy(alpha = 0.5f)
-                        )
-                    } else {
-                        null
-                    }
-
-                    val itemModifier = Modifier
+                    .padding(start = 24.dp, end = 24.dp, top = 20.dp, bottom = 160.dp) // bottom padding allows scrolling past floating capsule
+            ) {
+                Text(
+                    text = annotatedText,
+                    onTextLayout = { textLayoutResult = it },
+                    style = MaterialTheme.typography.bodyLarge.copy(
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Serif, // Elegant serif layout
+                        lineHeight = 34.sp,
+                        fontSize = 19.sp,
+                        letterSpacing = 0.1.sp
+                    ),
+                    modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(containerBg)
-                        .combinedClickable(
-                            onClick = {
-                                // Quick visual cursor selection feedback
-                            },
-                            onDoubleClick = {
-                                onSentenceJump(idx)
+                        .drawBehind {
+                            textLayoutResult?.let { layoutResult ->
+                                val range = sentenceRanges.getOrNull(activeSentenceIndex) ?: return@drawBehind
+                                val startOffset = range.first
+                                val endOffset = range.second
+                                
+                                val startLine = layoutResult.getLineForOffset(startOffset)
+                                val endLine = layoutResult.getLineForOffset(endOffset)
+                                
+                                val highlightColor = Color(0x664F26C4) // Translucent violet/indigo highlight background (40% opacity)
+                                
+                                for (line in startLine..endLine) {
+                                    val top = layoutResult.getLineTop(line)
+                                    val bottom = layoutResult.getLineBottom(line)
+                                    
+                                    val left = if (line == startLine) {
+                                        layoutResult.getHorizontalPosition(startOffset, true)
+                                    } else {
+                                        layoutResult.getLineLeft(line)
+                                    }
+                                    
+                                    val right = if (line == endLine) {
+                                        layoutResult.getHorizontalPosition(endOffset, true)
+                                    } else {
+                                        layoutResult.getLineRight(line)
+                                    }
+                                    
+                                    val xStart = minOf(left, right)
+                                    val xEnd = maxOf(left, right)
+                                    
+                                    val padX = 6.dp.toPx()
+                                    val padY = 2.dp.toPx()
+                                    
+                                    if (xEnd > xStart) {
+                                        drawRoundRect(
+                                            color = highlightColor,
+                                            topLeft = androidx.compose.ui.geometry.Offset(xStart - padX, top - padY),
+                                            size = androidx.compose.ui.geometry.Size(xEnd - xStart + 2 * padX, bottom - top + 2 * padY),
+                                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(6.dp.toPx(), 6.dp.toPx())
+                                        )
+                                    }
+                                }
                             }
-                        )
-
-                    val finalModifier = if (containerBorderStroke != null) {
-                        itemModifier.border(containerBorderStroke, RoundedCornerShape(10.dp))
-                    } else {
-                        itemModifier
-                    }
-
-                    Box(
-                        modifier = finalModifier.padding(horizontal = 14.dp, vertical = 12.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.Top,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                text = annotatedText,
-                                style = MaterialTheme.typography.bodyLarge.copy(
-                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Serif, // elegant serif layout
-                                    lineHeight = 30.sp,
-                                    fontSize = 18.sp,
-                                    letterSpacing = 0.1.sp
-                                ),
-                                color = if (isActive) {
-                                    Color.White // high emphasis
-                                } else {
-                                    Color.White.copy(alpha = 0.40f) // dimmed for inactive lines
+                        }
+                        .pointerInput(sentenceRanges, onSentenceJump) {
+                            detectTapGestures(
+                                onDoubleTap = { offset ->
+                                    textLayoutResult?.let { layoutResult ->
+                                        val charIndex = layoutResult.getOffsetForPosition(offset)
+                                        val clickedSentenceIdx = sentenceRanges.indexOfFirst { range ->
+                                            charIndex >= range.first && charIndex < range.second
+                                        }
+                                        if (clickedSentenceIdx != -1) {
+                                            onSentenceJump(clickedSentenceIdx)
+                                        }
+                                    }
                                 }
                             )
                         }
-                    }
-                }
+                )
             }
         }
     }
 }
 
-// Ext helper styles to avoid code repetition
+// Ext helper styles to avoid code repetition (used by ActivePlayerView)
 @Composable
 fun MaterialTheme.styleOfSubtitle() = typography.titleSmall.copy(
     fontSize = 11.sp,
