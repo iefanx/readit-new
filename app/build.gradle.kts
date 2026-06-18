@@ -1,3 +1,6 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
@@ -14,21 +17,37 @@ android {
     applicationId = "com.iefan.readout"
     minSdk = 24
     targetSdk = 36
-    versionCode = 5
-    versionName = "1.0.4"
+    versionCode = 14
+    versionName = "1.1.3"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
+  val localProperties = Properties()
+  val localPropertiesFile = rootProject.file("local.properties")
+  if (localPropertiesFile.exists()) {
+      val stream = FileInputStream(localPropertiesFile)
+      localProperties.load(stream)
+      stream.close()
+  }
+
   signingConfigs {
     create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/readout-upload-key.jks"
+      val keystorePath = System.getenv("KEYSTORE_PATH") 
+          ?: localProperties.getProperty("KEYSTORE_PATH") 
+          ?: "${rootDir}/readout-upload-key.jks"
       val keystoreFile = file(keystorePath)
       if (keystoreFile.exists()) {
         storeFile = keystoreFile
-        storePassword = System.getenv("STORE_PASSWORD") ?: "readoutpassword"
-        keyAlias = "readout-upload"
-        keyPassword = System.getenv("KEY_PASSWORD") ?: "readoutpassword"
+        storePassword = System.getenv("STORE_PASSWORD") 
+            ?: localProperties.getProperty("STORE_PASSWORD") 
+            ?: "readoutpassword"
+        keyAlias = System.getenv("KEY_ALIAS") 
+            ?: localProperties.getProperty("KEY_ALIAS") 
+            ?: "readout-upload"
+        keyPassword = System.getenv("KEY_PASSWORD") 
+            ?: localProperties.getProperty("KEY_PASSWORD") 
+            ?: "readoutpassword"
       } else {
         // Fallback to debug configuration so it compiles out-of-the-box
         storeFile = file("${rootDir}/debug.keystore")
@@ -48,9 +67,13 @@ android {
   buildTypes {
     release {
       isCrunchPngs = false
-      isMinifyEnabled = false
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = signingConfigs.getByName("release")
+      ndk {
+        debugSymbolLevel = "FULL"
+      }
     }
     debug {
       signingConfig = signingConfigs.getByName("debugConfig")

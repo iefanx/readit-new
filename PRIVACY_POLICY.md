@@ -41,4 +41,4 @@ We may update our Privacy Policy from time to time. Any changes will be made ava
 
 ## 6. Contact Us
 If you have any questions or suggestions regarding this Privacy Policy, please contact us at:
-* **Support Email**: [Your developer contact email]
+* **Support Email**: realiefan@gmail.com

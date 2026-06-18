@@ -4,14 +4,72 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [Document::class], version = 3, exportSchema = false)
+@Database(
+    entities = [
+        Document::class,
+        CollectionEntity::class,
+        DocumentCollectionCrossRef::class,
+        Chapter::class
+    ],
+    version = 5,
+    exportSchema = false
+)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun documentDao(): DocumentDao
 
     companion object {
         @Volatile
         private var INSTANCE: AppDatabase? = null
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. Add isFavorite column to documents
+                db.execSQL("ALTER TABLE documents ADD COLUMN isFavorite INTEGER NOT NULL DEFAULT 0")
+
+                // 2. Create collections table
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `collections` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, 
+                        `name` TEXT NOT NULL, 
+                        `addedDate` INTEGER NOT NULL
+                    )
+                """.trimIndent())
+
+                // 3. Create document_collection_cross_ref table
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `document_collection_cross_ref` (
+                        `documentId` INTEGER NOT NULL, 
+                        `collectionId` INTEGER NOT NULL, 
+                        PRIMARY KEY(`documentId`, `collectionId`),
+                        FOREIGN KEY(`documentId`) REFERENCES `documents`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE,
+                        FOREIGN KEY(`collectionId`) REFERENCES `collections`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                """.trimIndent())
+
+                // 4. Create indices on cross-ref columns
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_document_collection_cross_ref_documentId` ON `document_collection_cross_ref` (`documentId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_document_collection_cross_ref_collectionId` ON `document_collection_cross_ref` (`collectionId`)")
+            }
+        }
+
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `chapters` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `documentId` INTEGER NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `startCharOffset` INTEGER NOT NULL,
+                        `startSentenceIndex` INTEGER NOT NULL,
+                        FOREIGN KEY(`documentId`) REFERENCES `documents`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                """.trimIndent())
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_chapters_documentId` ON `chapters` (`documentId`)")
+            }
+        }
 
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
@@ -20,7 +78,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "readout_database"
                 )
-                .fallbackToDestructiveMigration()
+                .addMigrations(MIGRATION_3_4, MIGRATION_4_5)
                 .build()
                 INSTANCE = instance
                 instance

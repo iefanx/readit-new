@@ -9,9 +9,7 @@ import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.iefan.readout.data.AppDatabase
-import com.iefan.readout.data.Document
-import com.iefan.readout.data.DocumentRepository
+import com.iefan.readout.data.*
 import com.iefan.readout.tts.AuraTtsEngine
 import com.iefan.readout.tts.DocumentParser
 import com.iefan.readout.tts.SpeechSentence
@@ -34,6 +32,8 @@ data class BenchmarkResult(
     val recommendedTier: String
 )
 
+data class ExtractedDocument(val content: String, val chapters: List<ChapterCandidate>)
+
 class ReadoutViewModel(application: Application) : AndroidViewModel(application) {
 
     private val documentRepository: DocumentRepository
@@ -42,17 +42,36 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
     // All books / articles in library
     val allDocuments: StateFlow<List<Document>>
 
+    private val _isLibraryOpen = MutableStateFlow(false)
+    val isLibraryOpen = _isLibraryOpen.asStateFlow()
+
+    val allCollections: StateFlow<List<CollectionEntity>>
+    val allCrossRefs: StateFlow<List<DocumentCollectionCrossRef>>
+
     // Currently playing/viewed document
     private val _activeDocument = MutableStateFlow<Document?>(null)
     val activeDocument = _activeDocument.asStateFlow()
+
+    private val _isPlayerExpanded = MutableStateFlow(false)
+    val isPlayerExpanded = _isPlayerExpanded.asStateFlow()
 
     // Import visual loading state
     private val _isImporting = MutableStateFlow(false)
     val isImporting = _isImporting.asStateFlow()
 
+    private val _importError = MutableStateFlow<String?>(null)
+    val importError = _importError.asStateFlow()
+
+    fun clearImportError() {
+        _importError.value = null
+    }
+
     // Structured sentences for high-performance follow / jump highlight
     private val _activeSentences = MutableStateFlow<List<SpeechSentence>>(emptyList())
     val activeSentences = _activeSentences.asStateFlow()
+
+    private val _activeChapters = MutableStateFlow<List<Chapter>>(emptyList())
+    val activeChapters = _activeChapters.asStateFlow()
 
     // State bindings straight from TTS Engine
     val isPlaying: StateFlow<Boolean>
@@ -75,7 +94,25 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
         documentRepository = DocumentRepository(database.documentDao())
         ttsEngine = AuraTtsEngine(application)
 
+        val sharedPrefs = application.getSharedPreferences("readout_prefs", android.content.Context.MODE_PRIVATE)
+        val savedTier = sharedPrefs.getString("selected_voice_tier", "HIGH_FIDELITY") ?: "HIGH_FIDELITY"
+        ttsEngine.setModelTier(savedTier)
+
         allDocuments = documentRepository.allDocuments
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5000),
+                initialValue = emptyList()
+            )
+
+        allCollections = documentRepository.allCollections
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5000),
+                initialValue = emptyList()
+            )
+
+        allCrossRefs = documentRepository.allCrossRefs
             .stateIn(
                 scope = viewModelScope,
                 started = SharingStarted.WhileSubscribed(5000),
@@ -91,24 +128,27 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
         sleepTimerMinutes = ttsEngine.sleepTimerMinutes
         sleepTimerRemainingSeconds = ttsEngine.sleepTimerRemainingSeconds
 
-        // Listen for sentence changes to update Room position
+        // Listen for sentence changes to update Room position with a debounce of 3 seconds
         viewModelScope.launch {
-            currentSentenceIndex.collect { index ->
+            currentSentenceIndex.collectLatest { index ->
                 activeDocument.value?.let { doc ->
                     val sentencesList = _activeSentences.value
                     if (sentencesList.isNotEmpty() && index < sentencesList.size) {
                         val currentSentence = sentencesList[index]
+                        delay(3000)
                         documentRepository.updatePlaybackPosition(doc.id, currentSentence.start)
                     }
                 }
             }
         }
 
-        // Trigger preloads if db is empty
+        // Trigger preloads if db is empty and we haven't preloaded before
         viewModelScope.launch {
             allDocuments.collect { list ->
-                if (list.isEmpty()) {
+                val hasPreloaded = sharedPrefs.getBoolean("has_preloaded_samples", false)
+                if (list.isEmpty() && !hasPreloaded) {
                     preloadSampleBooks()
+                    sharedPrefs.edit().putBoolean("has_preloaded_samples", true).apply()
                 }
             }
         }
@@ -124,7 +164,7 @@ As a local-first system, this reading session contains zero remote trackers, zer
 
 This is Readout. To begin your focused auditory journey, try swiping up on the bottom active player bar to view real-time karaoke sentence tracking, or double tap on any sentence on that view to immediately skip your speech engine to that exact location. Playback speeds can be scaled fluidly from 0.5x up to 4.5x with fully compensated time-pitch dynamics.""",
                 sourceUrl = "Readout Sample Archive",
-                selectedModelTier = "BALANCED",
+                selectedModelTier = "HIGH_FIDELITY",
                 playbackSpeed = 1.0f
             ),
             Document(
@@ -133,7 +173,7 @@ This is Readout. To begin your focused auditory journey, try swiping up on the b
 
 With modern local-first DSP algorithms, digital time-stretching decouples speed from frequency entirely. Readout uses hardware-efficient offline processing models (recommending Ultra-Light, Balanced, or High-Fidelity tiers depending on core configurations) to preserve rich natural voice pitch, even when playback speed is driven up to a blistering 4.5 times normal listening speed.""",
                 sourceUrl = "DSP Learning Chronicles",
-                selectedModelTier = "BALANCED",
+                selectedModelTier = "HIGH_FIDELITY",
                 playbackSpeed = 1.2f
             )
         )
@@ -143,37 +183,94 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
     }
 
     fun selectDocument(document: Document) {
+        if (_activeDocument.value?.id == document.id) {
+            _isPlayerExpanded.value = true
+            return
+        }
+
+        ttsEngine.stop()
+
         val updatedDoc = document.copy(lastReadTime = System.currentTimeMillis())
         _activeDocument.value = updatedDoc
         viewModelScope.launch {
             documentRepository.update(updatedDoc)
-        }
-        val parsedSentences = DocumentParser.parse(updatedDoc.content)
-        _activeSentences.value = parsedSentences
+            
+            val chapters = documentRepository.getChaptersForDocument(updatedDoc.id)
+            _activeChapters.value = chapters
 
-        // Find best starting sentence index based on saved playback position
-        var savedSentenceIdx = 0
-        for ((idx, sent) in parsedSentences.withIndex()) {
-            if (updatedDoc.playbackPosition in sent.start..sent.end) {
-                savedSentenceIdx = idx
-                break
+            val parsedSentences = withContext(Dispatchers.Default) {
+                DocumentParser.parse(updatedDoc.content)
+            }
+            _activeSentences.value = parsedSentences
+
+            // Find best starting sentence index based on saved playback position
+            var savedSentenceIdx = 0
+            for ((idx, sent) in parsedSentences.withIndex()) {
+                if (updatedDoc.playbackPosition in sent.start..sent.end) {
+                    savedSentenceIdx = idx
+                    break
+                }
+            }
+
+            ttsEngine.loadDocument(parsedSentences, updatedDoc.title, savedSentenceIdx)
+            ttsEngine.setSpeed(updatedDoc.playbackSpeed)
+            _isPlayerExpanded.value = true
+        }
+    }
+
+    fun seekToChapter(chapter: Chapter) {
+        val sentencesList = _activeSentences.value
+        if (sentencesList.isNotEmpty()) {
+            var bestIdx = 0
+            var minDiff = Int.MAX_VALUE
+            for ((idx, sent) in sentencesList.withIndex()) {
+                val diff = Math.abs(sent.start - chapter.startCharOffset)
+                if (diff < minDiff) {
+                    minDiff = diff
+                    bestIdx = idx
+                }
+                if (sent.start >= chapter.startCharOffset) {
+                    bestIdx = idx
+                    break
+                }
+            }
+            seekToSentence(bestIdx)
+        }
+    }
+
+    private fun saveCurrentPlaybackPosition() {
+        val doc = _activeDocument.value ?: return
+        val index = currentSentenceIndex.value
+        val sentencesList = _activeSentences.value
+        if (sentencesList.isNotEmpty() && index < sentencesList.size) {
+            val currentSentence = sentencesList[index]
+            viewModelScope.launch {
+                documentRepository.updatePlaybackPosition(doc.id, currentSentence.start)
             }
         }
-
-        ttsEngine.loadDocument(updatedDoc.content, savedSentenceIdx)
-        ttsEngine.setSpeed(updatedDoc.playbackSpeed)
-        ttsEngine.setModelTier(updatedDoc.selectedModelTier)
     }
 
     fun deselectDocument() {
+        saveCurrentPlaybackPosition()
         ttsEngine.stop()
         _activeDocument.value = null
         _activeSentences.value = emptyList()
+        _isPlayerExpanded.value = false
+    }
+
+    fun minimizePlayer() {
+        saveCurrentPlaybackPosition()
+        _isPlayerExpanded.value = false
+    }
+
+    fun expandPlayer() {
+        _isPlayerExpanded.value = true
     }
 
     fun togglePlayback() {
         if (isPlaying.value) {
             ttsEngine.pausePlayback()
+            saveCurrentPlaybackPosition()
         } else {
             ttsEngine.startPlayback()
         }
@@ -204,6 +301,9 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
     fun setModelTier(tier: String) {
         ttsEngine.setModelTier(tier)
         viewModelScope.launch {
+            val sharedPrefs = getApplication<Application>().getSharedPreferences("readout_prefs", android.content.Context.MODE_PRIVATE)
+            sharedPrefs.edit().putString("selected_voice_tier", tier).apply()
+
             _activeDocument.value?.let { doc ->
                 documentRepository.updateModelTier(doc.id, tier)
                 _activeDocument.value = doc.copy(selectedModelTier = tier)
@@ -215,7 +315,7 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
         ttsEngine.startSleepTimer(minutes)
     }
 
-    fun addNewBook(title: String, content: String, sourceUrl: String?, coverPath: String? = null) {
+    fun addNewBook(title: String, content: String, sourceUrl: String?, coverPath: String? = null, chapters: List<ChapterCandidate> = emptyList()) {
         viewModelScope.launch {
             val doc = Document(
                 title = title.ifBlank { "Untitled Document" },
@@ -225,7 +325,67 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
             )
             val generatedId = documentRepository.insert(doc)
             val createdDoc = doc.copy(id = generatedId)
+            
+            if (chapters.isNotEmpty()) {
+                val dbChapters = chapters.map { candidate ->
+                    Chapter(
+                        documentId = generatedId,
+                        title = candidate.title,
+                        startCharOffset = candidate.charOffset
+                    )
+                }
+                documentRepository.insertChapters(dbChapters)
+            }
+            
             selectDocument(createdDoc)
+        }
+    }
+
+    fun setLibraryOpen(open: Boolean) {
+        _isLibraryOpen.value = open
+    }
+
+    fun toggleFavorite(document: Document) {
+        viewModelScope.launch {
+            val nextFav = !document.isFavorite
+            documentRepository.updateFavoriteStatus(document.id, nextFav)
+            if (_activeDocument.value?.id == document.id) {
+                _activeDocument.value = _activeDocument.value?.copy(isFavorite = nextFav)
+            }
+        }
+    }
+
+    fun createCollection(name: String, andAddDocumentId: Long? = null) {
+        viewModelScope.launch {
+            val colId = documentRepository.insertCollection(CollectionEntity(name = name))
+            if (andAddDocumentId != null) {
+                documentRepository.addDocumentToCollection(andAddDocumentId, colId)
+            }
+        }
+    }
+
+    fun addDocumentToCollection(documentId: Long, collectionId: Long) {
+        viewModelScope.launch {
+            documentRepository.addDocumentToCollection(documentId, collectionId)
+        }
+    }
+
+    fun removeDocumentFromCollection(documentId: Long, collectionId: Long) {
+        viewModelScope.launch {
+            documentRepository.removeDocumentFromCollection(documentId, collectionId)
+        }
+    }
+
+    fun deleteCollection(collection: CollectionEntity) {
+        viewModelScope.launch {
+            documentRepository.deleteCrossRefsForCollection(collection.id)
+            documentRepository.deleteCollection(collection)
+        }
+    }
+
+    fun renameCollection(collection: CollectionEntity, newName: String) {
+        viewModelScope.launch {
+            documentRepository.renameCollection(collection.id, newName)
         }
     }
 
@@ -235,6 +395,7 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
             if (_activeDocument.value?.id == document.id) {
                 deselectDocument()
             }
+            documentRepository.deleteCrossRefsForDocument(document.id)
             documentRepository.delete(document)
         }
     }
@@ -324,13 +485,15 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
                     val textToUse = if (rawTxt.isNotBlank()) rawTxt else doc.body().text()
 
                     if (textToUse.isNotBlank()) {
+                        val chapters = ChapterExtractor.extractChaptersFromText(textToUse)
                         withContext(Dispatchers.Main) {
-                            addNewBook(parsedTitle, textToUse, cleanUrl, null)
+                            addNewBook(parsedTitle, textToUse, cleanUrl, null, chapters)
                         }
                     }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
+                _importError.value = "Failed to import from URL: ${e.localizedMessage ?: "Unknown error"}"
             } finally {
                 _isImporting.value = false
             }
@@ -395,35 +558,37 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
                             }
                         }
 
-                        val content: String
+                        val extracted: ExtractedDocument
                         var coverPath: String? = null
 
                         if (isPdf) {
-                            content = extractTextFromPdf(tempFile)
+                            extracted = extractTextFromPdf(tempFile)
                             coverPath = generatePdfCover(tempFile)
                         } else if (isDocx) {
-                            content = extractTextFromDocx(tempFile)
+                            extracted = extractTextFromDocx(tempFile)
                         } else if (isEpub) {
-                            content = extractTextFromEpub(tempFile)
+                            extracted = extractTextFromEpub(tempFile)
                         } else if (isHtml) {
-                            content = extractTextFromHtml(tempFile)
+                            extracted = extractTextFromHtml(tempFile)
                         } else {
-                            content = extractTextFromTxt(tempFile)
+                            extracted = extractTextFromTxt(tempFile)
                         }
 
-                        if (content.isNotBlank()) {
+                        if (extracted.content.isNotBlank()) {
                             withContext(Dispatchers.Main) {
-                                addNewBook(titleToUse, content, fileName, coverPath)
+                                addNewBook(titleToUse, extracted.content, fileName, coverPath, extracted.chapters)
                             }
                         }
                     } catch (e: Exception) {
                         e.printStackTrace()
+                        _importError.value = "Failed to process imported file: ${e.localizedMessage ?: "Unknown error"}"
                     } finally {
                         tempFile.delete()
                     }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
+                _importError.value = "Failed to read imported file: ${e.localizedMessage ?: "Unknown error"}"
             } finally {
                 _isImporting.value = false
             }
@@ -472,52 +637,44 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
         return cleanedBlocks.joinToString("\n\n")
     }
 
-    private suspend fun extractTextFromPdf(file: File): String = withContext(Dispatchers.IO) {
+    private suspend fun extractTextFromPdf(file: File): ExtractedDocument = withContext(Dispatchers.IO) {
         var reader: PdfReader? = null
         try {
             val stream = file.inputStream()
             reader = PdfReader(stream)
             val numberOfPages = reader.numberOfPages
             val textBuilder = StringBuilder()
+            val pageStartOffsets = mutableListOf<Int>()
+            pageStartOffsets.add(0) // page 0 placeholder
+            
             for (i in 1..numberOfPages) {
                 val pageText = PdfTextExtractor.getTextFromPage(reader, i)
-                if (!pageText.isNullOrBlank()) {
-                    val trimmedPageText = pageText.trim()
+                val cleanedPageText = if (pageText != null) cleanTextParagraphs(pageText) else ""
+                
+                pageStartOffsets.add(textBuilder.length)
+                
+                if (cleanedPageText.isNotEmpty()) {
                     if (textBuilder.isNotEmpty()) {
-                        val lastChar = textBuilder.trim().lastOrNull() ?: ' '
-                        val isSentenceEnd = lastChar == '.' || lastChar == '?' || lastChar == '!' || lastChar == '"' || lastChar == '”' || lastChar == '’'
-                        if (isSentenceEnd) {
-                            textBuilder.append("\n\n")
-                        } else {
-                            if (lastChar == '-') {
-                                var len = textBuilder.length
-                                while (len > 0 && textBuilder[len - 1].isWhitespace()) {
-                                    len--
-                                }
-                                if (len > 0 && textBuilder[len - 1] == '-') {
-                                    textBuilder.setLength(len - 1)
-                                }
-                            } else {
-                                textBuilder.append(" ")
-                            }
-                        }
+                        textBuilder.append("\n\n")
                     }
-                    textBuilder.append(trimmedPageText)
+                    textBuilder.append(cleanedPageText)
                 }
             }
-            cleanTextParagraphs(textBuilder.toString())
+            val content = textBuilder.toString()
+            val chapters = ChapterExtractor.extractChaptersFromPdf(file, content, pageStartOffsets)
+            ExtractedDocument(content, chapters)
         } catch (e: Exception) {
             e.printStackTrace()
-            ""
+            ExtractedDocument("", emptyList())
         } finally {
             reader?.close()
         }
     }
 
-    private suspend fun extractTextFromDocx(file: File): String = withContext(Dispatchers.IO) {
+    private suspend fun extractTextFromDocx(file: File): ExtractedDocument = withContext(Dispatchers.IO) {
         try {
             java.util.zip.ZipFile(file).use { zip ->
-                val entry = zip.getEntry("word/document.xml") ?: return@withContext ""
+                val entry = zip.getEntry("word/document.xml") ?: return@withContext ExtractedDocument("", emptyList())
                 zip.getInputStream(entry).use { stream ->
                     val xml = stream.bufferedReader(Charsets.UTF_8).readText()
                     val doc = Jsoup.parse(xml, "", org.jsoup.parser.Parser.xmlParser())
@@ -535,16 +692,18 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
                             result.append(pText).append("\n\n")
                         }
                     }
-                    cleanTextParagraphs(result.toString())
+                    val content = cleanTextParagraphs(result.toString())
+                    val chapters = ChapterExtractor.extractChaptersFromText(content)
+                    ExtractedDocument(content, chapters)
                 }
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            ""
+            ExtractedDocument("", emptyList())
         }
     }
 
-    private suspend fun extractTextFromEpub(file: File): String = withContext(Dispatchers.IO) {
+    private suspend fun extractTextFromEpub(file: File): ExtractedDocument = withContext(Dispatchers.IO) {
         try {
             val result = StringBuilder()
             java.util.zip.ZipFile(file).use { zip ->
@@ -554,7 +713,7 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
                     !entry.isDirectory && (name.endsWith(".xhtml") || name.endsWith(".html") || name.endsWith(".htm"))
                 }.sortedBy { it.name }
 
-                if (textEntries.isEmpty()) return@withContext ""
+                if (textEntries.isEmpty()) return@withContext ExtractedDocument("", emptyList())
 
                 for (entry in textEntries) {
                     zip.getInputStream(entry).use { stream ->
@@ -566,15 +725,17 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
                     }
                 }
             }
-            cleanTextParagraphs(result.toString())
+            val content = cleanTextParagraphs(result.toString())
+            val chapters = ChapterExtractor.extractChaptersFromEpub(file, content)
+            ExtractedDocument(content, chapters)
         } catch (e: Exception) {
             e.printStackTrace()
-            ""
+            ExtractedDocument("", emptyList())
         }
     }
 
-    private suspend fun extractTextFromHtml(file: File): String = withContext(Dispatchers.IO) {
-        try {
+    private suspend fun extractTextFromHtml(file: File): ExtractedDocument = withContext(Dispatchers.IO) {
+        val content = try {
             val rawHtml = file.readText(Charsets.UTF_8)
             extractParagraphsFromHtml(rawHtml)
         } catch (e: Exception) {
@@ -585,6 +746,8 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
                 ""
             }
         }
+        val chapters = ChapterExtractor.extractChaptersFromText(content)
+        ExtractedDocument(content, chapters)
     }
 
     private fun extractParagraphsFromHtml(html: String): String {
@@ -643,14 +806,48 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
         }
     }
 
-    private suspend fun extractTextFromTxt(file: File): String = withContext(Dispatchers.IO) {
-        try {
+    private suspend fun extractTextFromTxt(file: File): ExtractedDocument = withContext(Dispatchers.IO) {
+        val content = try {
             file.readText(Charsets.UTF_8)
         } catch (e: Exception) {
             try {
                 file.readText(Charsets.ISO_8859_1)
             } catch (ex: Exception) {
                 ""
+            }
+        }
+        val chapters = ChapterExtractor.extractChaptersFromText(content)
+        ExtractedDocument(content, chapters)
+    }
+
+    fun updateBookDetails(documentId: Long, newTitle: String, newCoverUri: android.net.Uri?, removeCover: Boolean) {
+        viewModelScope.launch {
+            val doc = documentRepository.getDocumentById(documentId)
+            if (doc != null) {
+                var coverPath = if (removeCover) null else doc.coverPath
+                
+                if (newCoverUri != null && !removeCover) {
+                    val context = getApplication<Application>()
+                    val contentResolver = context.contentResolver
+                    val tempFile = File(context.filesDir, "cover_${System.currentTimeMillis()}.png")
+                    try {
+                        contentResolver.openInputStream(newCoverUri)?.use { input ->
+                            FileOutputStream(tempFile).use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                        coverPath = tempFile.absolutePath
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+
+                val updatedDoc = doc.copy(title = newTitle, coverPath = coverPath)
+                documentRepository.update(updatedDoc)
+                
+                if (_activeDocument.value?.id == documentId) {
+                    _activeDocument.value = updatedDoc
+                }
             }
         }
     }

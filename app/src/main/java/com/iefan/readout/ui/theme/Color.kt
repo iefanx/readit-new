@@ -10,18 +10,18 @@ val OledOnBg = Color(0xFFFFFFFF)
 val OledOnSurface = Color(0xFFF1F1F4)
 val OledOnSurfaceVariant = Color(0xFF9E9EAF) // Elegant grey for secondary texts/subtitles
 
-val OledPrimary = Color(0xFF9575CD) // Premium soft lavender purple
-val OledOnPrimary = Color(0xFF000000)
-val OledPrimaryContainer = Color(0xFF3F1D77) // Rich dark purple/indigo container for play/pill highlights
-val OledOnPrimaryContainer = Color(0xFFEADDFF)
+val OledPrimary = Color(0xFF2F66F6) // Premium Royal Blue
+val OledOnPrimary = Color(0xFFFFFFFF) // White text on primary buttons
+val OledPrimaryContainer = Color(0xFF0F2C84) // Deep Navy Blue container for highlights
+val OledOnPrimaryContainer = Color(0xFFDBEAFE) // Soft blue on container
 
-val OledSecondary = Color(0xFF62597A)
+val OledSecondary = Color(0xFF475569) // Premium slate gray
 val OledOnSecondary = Color(0xFFFFFFFF)
-val OledSecondaryContainer = Color(0xFF1E1C24) // Subtle charcoal/indigo container for badges
-val OledOnSecondaryContainer = Color(0xFFE8DEF8)
+val OledSecondaryContainer = Color(0xFF1E293B) // Dark Charcoal/Slate Blue container
+val OledOnSecondaryContainer = Color(0xFFE2E8F0)
 
-val OledTertiary = Color(0xFF7D5260)
-val OledTertiaryContainer = Color(0xFFFFD8E4)
+val OledTertiary = Color(0xFF0D9488) // Sophisticated Teal
+val OledTertiaryContainer = Color(0xFFCCFBF1)
 
 // Classic backup colors
 val Purple80 = Color(0xFFD0BCFF)

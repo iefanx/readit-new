@@ -9,6 +9,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -33,6 +35,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.iefan.readout.data.Document
+import com.iefan.readout.data.CollectionEntity
+import com.iefan.readout.data.DocumentCollectionCrossRef
 import com.iefan.readout.ui.components.styleOfCaption
 import com.iefan.readout.ui.components.styleOfSubtitle
 
@@ -46,17 +50,40 @@ enum class AddInputType {
 @Composable
 fun MainLibraryView(
     allDocuments: List<Document>,
+    allCollections: List<CollectionEntity>,
+    allCrossRefs: List<DocumentCollectionCrossRef>,
     onSelectDocument: (Document) -> Unit,
     onDeleteDocument: (Document) -> Unit,
+    onEditDocument: (Long, String, Uri?, Boolean) -> Unit = { _, _, _, _ -> },
     onAddDocument: (String, String, String?, String?) -> Unit,
-    onOpenBenchmark: () -> Unit,
+    onOpenVoiceSelector: () -> Unit,
+    onOpenLibrary: () -> Unit,
+    onToggleFavorite: (Document) -> Unit,
+    onAddDocumentToCollection: (Long, Long) -> Unit,
+    onRemoveDocumentFromCollection: (Long, Long) -> Unit,
+    onCreateCollection: (String, Long?) -> Unit,
+    onDeleteCollection: (CollectionEntity) -> Unit,
+    onRenameCollection: (CollectionEntity, String) -> Unit,
     isImporting: Boolean = false,
     onUrlImport: (String, String?) -> Unit = { _, _ -> },
     onUriImport: (Uri, String?) -> Unit = { _, _ -> },
+    activeDocument: Document? = null,
+    isPlaying: Boolean = false,
+    progressFraction: Float = 0f,
+    onTogglePlayback: () -> Unit = {},
+    onSkipForward: () -> Unit = {},
+    onExpandPlayer: () -> Unit = {},
+    onCloseMiniPlayer: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
     var activeInputType by remember { mutableStateOf(AddInputType.PASTE) }
+    var collectionTargetDoc by remember { mutableStateOf<Document?>(null) }
+    var renameTargetCollection by remember { mutableStateOf<CollectionEntity?>(null) }
+    var documentToDelete by remember { mutableStateOf<Document?>(null) }
+    var collectionToDelete by remember { mutableStateOf<CollectionEntity?>(null) }
+    var documentToEdit by remember { mutableStateOf<Document?>(null) }
+    var activeOptionsDoc by remember { mutableStateOf<Document?>(null) }
     
     // State management for raw picked uri
     var selectedFileUri by remember { mutableStateOf<Uri?>(null) }
@@ -86,6 +113,7 @@ fun MainLibraryView(
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
+                windowInsets = WindowInsets(0, 0, 0, 0),
                 title = {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -111,10 +139,17 @@ fun MainLibraryView(
                     }
                 },
                 actions = {
-                    IconButton(onClick = onOpenBenchmark) {
+                    IconButton(onClick = onOpenLibrary) {
                         Icon(
-                            imageVector = Icons.Default.Bolt,
-                            contentDescription = "Hardware Benchmark",
+                            imageVector = Icons.Default.MenuBook,
+                            contentDescription = "Library",
+                            tint = Color.White
+                        )
+                    }
+                    IconButton(onClick = onOpenVoiceSelector) {
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = "Voice Selector",
                             tint = Color.White
                         )
                     }
@@ -142,89 +177,42 @@ fun MainLibraryView(
                 item {
                     Spacer(modifier = Modifier.height(10.dp))
                     
-                    // Elegant, clean non-clickable static hero banner
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(24.dp))
-                            .background(
-                                Brush.linearGradient(
-                                    colors = listOf(Color(0xFF261066), Color(0xFF09090A))
-                                )
-                            )
-                            .border(1.dp, Color(0xFF24242A), RoundedCornerShape(24.dp))
-                            .padding(24.dp)
-                    ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(
-                                text = "TRANSFORM YOUR READING",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Black,
-                                letterSpacing = 1.5.sp,
-                                color = Color(0xFF9E82F5)
-                            )
-                            Text(
-                                text = "Upload any document and read it as an audiobook in your preferred speed",
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White,
-                                lineHeight = 22.sp
-                            )
-                        }
-                    }
-                }
-
-                item {
-                    // Heading 1: Text to Speech
-                    Column(
+                    // Unified Action buttons side by side
+                    Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalAlignment = Alignment.Start
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Text(
-                            text = "Text to Speech",
-                            fontSize = 22.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
+                        // File Action Card (triggers Activity file picker)
+                        ActionCard(
+                            title = "File",
+                            icon = Icons.Default.NoteAdd,
+                            onClick = { 
+                                fileLauncher.launch("*/*")
+                            },
+                            modifier = Modifier.weight(1f)
                         )
-                        Spacer(modifier = Modifier.height(16.dp))
-
-                        // Unified Action buttons side by side
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            // File Action Card (triggers Activity file picker)
-                            ActionCard(
-                                title = "File",
-                                icon = Icons.Default.NoteAdd,
-                                onClick = { 
-                                    fileLauncher.launch("*/*")
-                                },
-                                modifier = Modifier.weight(1f)
-                            )
-                            // Paste Text Action Card
-                            ActionCard(
-                                title = "Paste Text",
-                                icon = Icons.Default.ContentPaste,
-                                onClick = { 
-                                    selectedFileUri = null
-                                    activeInputType = AddInputType.PASTE
-                                    showAddDialog = true 
-                                },
-                                modifier = Modifier.weight(1f)
-                            )
-                            // Link Action Card
-                            ActionCard(
-                                title = "Link",
-                                icon = Icons.Default.Link,
-                                onClick = { 
-                                    selectedFileUri = null
-                                    activeInputType = AddInputType.URL
-                                    showAddDialog = true 
-                                },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
+                        // Paste Action Card
+                        ActionCard(
+                            title = "Paste",
+                            icon = Icons.Default.ContentPaste,
+                            onClick = { 
+                                selectedFileUri = null
+                                activeInputType = AddInputType.PASTE
+                                showAddDialog = true 
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        // Link Action Card
+                        ActionCard(
+                            title = "Link",
+                            icon = Icons.Default.Link,
+                            onClick = { 
+                                selectedFileUri = null
+                                activeInputType = AddInputType.URL
+                                showAddDialog = true 
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
                     }
                 }
 
@@ -280,11 +268,129 @@ fun MainLibraryView(
                                     .fillMaxWidth()
                                     .testTag("recent_reads_row")
                             ) {
-                                items(allDocuments) { doc ->
+                                items(allDocuments, key = { it.id }) { doc ->
                                     DocumentCard(
                                         document = doc,
                                         onSelect = { onSelectDocument(doc) },
-                                        onDelete = { onDeleteDocument(doc) }
+                                        onLongSelect = { activeOptionsDoc = doc }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                val favoriteDocs = allDocuments.filter { it.isFavorite }
+                if (favoriteDocs.isNotEmpty()) {
+                    item {
+                        // Heading 3: Favorites
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                text = "Favorites",
+                                fontSize = 22.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            // Scrollable Row of Documents styled beautifully as Cover sheets
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                items(favoriteDocs, key = { it.id }) { doc ->
+                                    DocumentCard(
+                                        document = doc,
+                                        onSelect = { onSelectDocument(doc) },
+                                        onLongSelect = { activeOptionsDoc = doc }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                val nonEvictCollections = allCollections.map { col ->
+                    val docIds = allCrossRefs.filter { it.collectionId == col.id }.map { it.documentId }.toSet()
+                    col to allDocuments.filter { it.id in docIds }
+                }.filter { it.second.isNotEmpty() }
+
+                if (nonEvictCollections.isNotEmpty()) {
+                    items(nonEvictCollections, key = { it.first.id }) { (col, colDocs) ->
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = col.name,
+                                    fontSize = 22.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Box {
+                                    var showColMenu by remember { mutableStateOf(false) }
+                                    IconButton(
+                                        onClick = { showColMenu = true },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.MoreVert,
+                                            contentDescription = "Collection Options",
+                                            tint = Color.Gray,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                    DropdownMenu(
+                                        expanded = showColMenu,
+                                        onDismissRequest = { showColMenu = false },
+                                        modifier = Modifier.background(Color(0xFF1D1D20))
+                                    ) {
+                                        DropdownMenuItem(
+                                            leadingIcon = {
+                                                Icon(
+                                                    imageVector = Icons.Default.Edit,
+                                                    contentDescription = "Rename",
+                                                    tint = Color.White
+                                                )
+                                            },
+                                            text = { Text("Rename", color = Color.White) },
+                                            onClick = {
+                                                renameTargetCollection = col
+                                                showColMenu = false
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            leadingIcon = {
+                                                Icon(
+                                                    imageVector = Icons.Default.Delete,
+                                                    contentDescription = "Delete",
+                                                    tint = Color.Red
+                                                )
+                                            },
+                                            text = { Text("Delete", color = Color.Red) },
+                                            onClick = {
+                                                collectionToDelete = col
+                                                showColMenu = false
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                            
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                items(colDocs, key = { it.id }) { doc ->
+                                    DocumentCard(
+                                        document = doc,
+                                        onSelect = { onSelectDocument(doc) },
+                                        onLongSelect = { activeOptionsDoc = doc }
                                     )
                                 }
                             }
@@ -293,8 +399,24 @@ fun MainLibraryView(
                 }
                 
                 item {
-                    Spacer(modifier = Modifier.height(40.dp))
+                    Spacer(modifier = Modifier.height(95.dp))
                 }
+            }
+
+            if (activeDocument != null) {
+                MiniPlayer(
+                    document = activeDocument,
+                    isPlaying = isPlaying,
+                    progressFraction = progressFraction,
+                    onTogglePlayback = onTogglePlayback,
+                    onExpand = onExpandPlayer,
+                    onClose = onCloseMiniPlayer,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 16.dp)
+                        .width(330.dp)
+                        .height(72.dp)
+                )
             }
         }
 
@@ -334,7 +456,7 @@ fun MainLibraryView(
                             .padding(vertical = 24.dp)
                     ) {
                         CircularProgressIndicator(
-                            color = Color(0xFF7F4FFD),
+                            color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(56.dp)
                         )
                         Spacer(modifier = Modifier.height(24.dp))
@@ -357,6 +479,155 @@ fun MainLibraryView(
                 shape = RoundedCornerShape(24.dp)
             )
         }
+
+        collectionTargetDoc?.let { doc ->
+            CollectionAssignDialog(
+                document = doc,
+                allCollections = allCollections,
+                allCrossRefs = allCrossRefs,
+                onDismiss = { collectionTargetDoc = null },
+                onAddRelation = { colId -> onAddDocumentToCollection(doc.id, colId) },
+                onRemoveRelation = { colId -> onRemoveDocumentFromCollection(doc.id, colId) },
+                onCreateCollection = { name -> onCreateCollection(name, doc.id) },
+                onDeleteCollection = onDeleteCollection
+            )
+        }
+
+        renameTargetCollection?.let { col ->
+            var textVal by remember(col) { mutableStateOf(col.name) }
+            AlertDialog(
+                onDismissRequest = { renameTargetCollection = null },
+                title = {
+                    Text(
+                        text = "Rename Collection",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                },
+                text = {
+                    OutlinedTextField(
+                        value = textVal,
+                        onValueChange = { textVal = it },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = Color(0xFF242426),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            if (textVal.isNotBlank()) {
+                                onRenameCollection(col, textVal.trim())
+                                renameTargetCollection = null
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Rename", color = Color.White)
+                    }
+                },
+                dismissButton = {
+                    Button(
+                        onClick = { renameTargetCollection = null },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF1D1D20)
+                        ),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF242426)),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Cancel", color = Color.White)
+                    }
+                },
+                containerColor = Color(0xFF141416),
+                shape = RoundedCornerShape(24.dp)
+            )
+        }
+
+        documentToDelete?.let { doc ->
+            AlertDialog(
+                onDismissRequest = { documentToDelete = null },
+                title = { Text("Delete Document") },
+                text = { Text("Are you sure you want to permanently delete \"${doc.title}\"? This action cannot be undone.") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            onDeleteDocument(doc)
+                            documentToDelete = null
+                        }
+                    ) {
+                        Text("Delete", color = Color.Red)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { documentToDelete = null }) {
+                        Text("Cancel", color = Color.White)
+                    }
+                },
+                containerColor = Color(0xFF141416),
+                titleContentColor = Color.White,
+                textContentColor = Color.LightGray,
+                shape = RoundedCornerShape(24.dp)
+            )
+        }
+
+        collectionToDelete?.let { col ->
+            AlertDialog(
+                onDismissRequest = { collectionToDelete = null },
+                title = { Text("Delete Collection") },
+                text = { Text("Are you sure you want to delete the collection \"${col.name}\"? The files inside this collection will not be deleted.") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            onDeleteCollection(col)
+                            collectionToDelete = null
+                        }
+                    ) {
+                        Text("Delete", color = Color.Red)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { collectionToDelete = null }) {
+                        Text("Cancel", color = Color.White)
+                    }
+                },
+                containerColor = Color(0xFF141416),
+                titleContentColor = Color.White,
+                textContentColor = Color.LightGray,
+                shape = RoundedCornerShape(24.dp)
+            )
+        }
+
+        documentToEdit?.let { doc ->
+            com.iefan.readout.ui.components.EditBookDetailsDialog(
+                document = doc,
+                onDismiss = { documentToEdit = null },
+                onSave = { newTitle, newCoverUri, removeCover ->
+                    onEditDocument(doc.id, newTitle, newCoverUri, removeCover)
+                    documentToEdit = null
+                }
+            )
+        }
+
+        activeOptionsDoc?.let { doc ->
+            com.iefan.readout.ui.components.BookOptionsDialog(
+                document = doc,
+                onDismiss = { activeOptionsDoc = null },
+                onToggleFavorite = { onToggleFavorite(doc) },
+                onAddToCollection = { collectionTargetDoc = doc },
+                onEdit = { documentToEdit = doc },
+                onDelete = { documentToDelete = doc }
+            )
+        }
     }
 }
 
@@ -369,12 +640,13 @@ fun ActionCard(
 ) {
     Card(
         modifier = modifier
-            .height(110.dp)
+            .height(72.dp)
             .clickable { onClick() },
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
             containerColor = Color(0xFF141416)
-        )
+        ),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF242426))
     ) {
         Column(
             modifier = Modifier.fillMaxSize(),
@@ -385,12 +657,12 @@ fun ActionCard(
                 imageVector = icon,
                 contentDescription = title,
                 tint = Color.White,
-                modifier = Modifier.size(28.dp)
+                modifier = Modifier.size(20.dp)
             )
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text = title,
-                fontSize = 14.sp,
+                fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.White
             )
@@ -398,24 +670,45 @@ fun ActionCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DocumentCard(
     document: Document,
     onSelect: () -> Unit,
-    onDelete: () -> Unit
+    onLongSelect: () -> Unit
 ) {
     val isPastedText = document.sourceUrl.isNullOrEmpty() || document.title.lowercase().contains("paste")
+    val isLink = document.sourceUrl?.startsWith("http", ignoreCase = true) == true ||
+                 document.sourceUrl?.startsWith("www.", ignoreCase = true) == true
     
     // Retrieve cover photo locally if present or render a clean typographic preview
-    val localCoverBitmap = remember(document.coverPath) {
-        document.coverPath?.let { path ->
-            try {
-                BitmapFactory.decodeFile(path)?.asImageBitmap()
-            } catch (e: Exception) {
-                null
+    val localCoverBitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(initialValue = null, key1 = document.coverPath) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            document.coverPath?.let { path ->
+                try {
+                    BitmapFactory.decodeFile(path)?.asImageBitmap()
+                } catch (e: Exception) {
+                    null
+                }
             }
         }
     }
+
+    // Curated elegant gradients for default covers based on title hash
+    val coverGradients = remember {
+        listOf(
+            listOf(Color(0xFF1E3A8A), Color(0xFF0F172A)), // Sapphire Navy
+            listOf(Color(0xFF0F1E36), Color(0xFF1E293B)), // Slate Steel
+            listOf(Color(0xFF1E1B4B), Color(0xFF312E81)), // Twilight Midnight
+            listOf(Color(0xFF0F2027), Color(0xFF2C5364)), // Deep Ocean Teal
+            listOf(Color(0xFF022C22), Color(0xFF064E3B))  // Hunter Emerald
+        )
+    }
+
+    val gradientIndex = remember(document.title) {
+        Math.abs(document.title.hashCode()) % coverGradients.size
+    }
+    val coverGradient = coverGradients[gradientIndex]
 
     Column(
         modifier = Modifier
@@ -428,98 +721,80 @@ fun DocumentCard(
                 .width(135.dp)
                 .height(175.dp)
                 .clip(RoundedCornerShape(14.dp))
-                .clickable { onSelect() }
+                .combinedClickable(
+                    onClick = onSelect,
+                    onLongClick = onLongSelect
+                )
                 .testTag("document_card_${document.id}")
         ) {
-            if (localCoverBitmap != null) {
+            val coverBitmap = localCoverBitmap
+            if (coverBitmap != null) {
                 // Real Extracted Vector/PDF Thumbnail Preview Cover
                 Image(
-                    bitmap = localCoverBitmap,
+                    bitmap = coverBitmap,
                     contentDescription = "Document Cover Image",
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
                 )
-            } else if (isPastedText) {
+            } else {
+                // Typographic, highly premium minimalist cover design
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(
-                            Brush.verticalGradient(
-                                colors = listOf(
-                                    Color(0xFF3F1D77), // Premium dark purple
-                                    Color(0xFF160E2A)  // Deep indigo
-                                )
-                            )
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "Pasted Text",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(12.dp)
-                    )
-                }
-            } else {
-                // Paper document look with elegant styling
-                Card(
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color.White),
-                    modifier = Modifier.fillMaxSize()
+                        .background(Brush.verticalGradient(coverGradient))
+                        .padding(14.dp)
                 ) {
                     Column(
-                        modifier = Modifier
-                            .padding(top = 16.dp, start = 12.dp, end = 12.dp, bottom = 12.dp)
-                            .fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.SpaceBetween
                     ) {
+                        // Top row: Document type icon
+                        val iconVector = when {
+                            isPastedText -> Icons.Default.ContentPaste
+                            isLink -> Icons.Default.Link
+                            else -> Icons.Default.MenuBook
+                        }
+                        Icon(
+                            imageVector = iconVector,
+                            contentDescription = "Type",
+                            tint = Color.White.copy(alpha = 0.5f),
+                            modifier = Modifier.size(18.dp)
+                        )
+
+                        // Middle: Elegant typeset title
                         Text(
                             text = document.title,
                             fontFamily = androidx.compose.ui.text.font.FontFamily.Serif,
-                            fontSize = 8.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.Black,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White.copy(alpha = 0.95f),
+                            lineHeight = 16.sp,
                             maxLines = 4,
-                            lineHeight = 10.sp,
                             overflow = TextOverflow.Ellipsis
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        
-                        // Fake visual line segments representing real paragraphs
-                        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            for (i in 0 until 12) {
-                                val lineFraction = if (i % 4 == 0) 0.5f else if (i % 6 == 0) 0.3f else 0.95f
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth(lineFraction)
-                                        .height(2.5.dp)
-                                        .clip(RoundedCornerShape(1.dp))
-                                        .background(Color.Black.copy(alpha = 0.08f))
-                                )
-                            }
+
+                        // Bottom: Tag badge
+                        val tagLabel = when {
+                            isPastedText -> "PASTE"
+                            isLink -> "LINK"
+                            else -> "FILE"
+                        }
+                        Box(
+                            modifier = Modifier
+                                .background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(6.dp))
+                                .border(0.5.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 6.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                text = tagLabel,
+                                color = Color.White.copy(alpha = 0.7f),
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 0.5.sp
+                            )
                         }
                     }
                 }
-            }
-
-            // Small, sleek, round floating Delete Button on top of card
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(8.dp)
-                    .size(26.dp)
-                    .clip(RoundedCornerShape(13.dp))
-                    .background(Color.Black.copy(alpha = 0.5f))
-                    .clickable { onDelete() },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Delete,
-                    contentDescription = "Delete",
-                    tint = Color.White,
-                    modifier = Modifier.size(13.dp)
-                )
             }
 
             // Visual Progress Strip at the bottom of the cover
@@ -538,7 +813,7 @@ fun DocumentCard(
                     modifier = Modifier
                         .fillMaxHeight()
                         .fillMaxWidth(percentage)
-                        .background(Color(0xFF7F4FFD))
+                        .background(MaterialTheme.colorScheme.primary)
                 )
             }
         }
@@ -566,7 +841,7 @@ fun DocumentCard(
             text = "Progress: $positionPercentage%",
             fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold,
-            color = Color(0xFF9E82F5)
+            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)
         )
     }
 }
@@ -626,7 +901,7 @@ fun AddDocumentDialog(
                                 .weight(1f)
                                 .fillMaxHeight()
                                 .clip(RoundedCornerShape(17.dp))
-                                .background(if (isSelected) Color(0xFF7F4FFD) else Color.Transparent)
+                                .background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent)
                                 .clickable { currentTab = tab },
                             contentAlignment = Alignment.Center
                         ) {
@@ -686,7 +961,7 @@ fun AddDocumentDialog(
                                 label = { Text("Document Title") },
                                 textStyle = androidx.compose.ui.text.TextStyle(color = Color.White),
                                 colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = Color(0xFF7F4FFD),
+                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
                                     unfocusedBorderColor = Color(0xFF333339)
                                 ),
                                 modifier = Modifier
@@ -703,7 +978,7 @@ fun AddDocumentDialog(
                                 text = "QUICK LOAD PRESETS",
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.ExtraBold,
-                                color = Color(0xFF9E82F5)
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)
                             )
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -718,8 +993,8 @@ This is incredibly important for mobile computers, meaning zero networking costs
                                         url = "https://example.com/edge-ai-revolution"
                                     },
                                     colors = ButtonDefaults.buttonColors(
-                                        containerColor = Color(0xFF1D1B28),
-                                        contentColor = Color(0xFF9E82F5)
+                                        containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                                        contentColor = MaterialTheme.colorScheme.primary
                                     ),
                                     modifier = Modifier
                                         .weight(1f)
@@ -738,8 +1013,8 @@ By eliminating the constant visual notifications of modern computers and turning
                                         url = "https://example.com/mindful-computing"
                                     },
                                     colors = ButtonDefaults.buttonColors(
-                                        containerColor = Color(0xFF1D1B28),
-                                        contentColor = Color(0xFF9E82F5)
+                                        containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                                        contentColor = MaterialTheme.colorScheme.primary
                                     ),
                                     modifier = Modifier
                                         .weight(1f)
@@ -758,7 +1033,7 @@ By eliminating the constant visual notifications of modern computers and turning
                                 label = { Text("Document Title") },
                                 textStyle = androidx.compose.ui.text.TextStyle(color = Color.White),
                                 colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = Color(0xFF7F4FFD),
+                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
                                     unfocusedBorderColor = Color(0xFF333339)
                                 ),
                                 modifier = Modifier
@@ -773,7 +1048,7 @@ By eliminating the constant visual notifications of modern computers and turning
                                 label = { Text("Article Content / Raw Text") },
                                 textStyle = androidx.compose.ui.text.TextStyle(color = Color.White),
                                 colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = Color(0xFF7F4FFD),
+                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
                                     unfocusedBorderColor = Color(0xFF333339)
                                 ),
                                 modifier = Modifier
@@ -798,7 +1073,7 @@ By eliminating the constant visual notifications of modern computers and turning
                                 label = { Text("Article URL / Address") },
                                 textStyle = androidx.compose.ui.text.TextStyle(color = Color.White),
                                 colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = Color(0xFF7F4FFD),
+                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
                                     unfocusedBorderColor = Color(0xFF333339)
                                 ),
                                 modifier = Modifier
@@ -813,7 +1088,7 @@ By eliminating the constant visual notifications of modern computers and turning
                                 label = { Text("Document Title (Optional/Auto)") },
                                 textStyle = androidx.compose.ui.text.TextStyle(color = Color.White),
                                 colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = Color(0xFF7F4FFD),
+                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
                                     unfocusedBorderColor = Color(0xFF333339)
                                 ),
                                 modifier = Modifier
@@ -853,8 +1128,8 @@ By eliminating the constant visual notifications of modern computers and turning
                     AddInputType.URL -> url.isNotBlank()
                 },
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF7F4FFD),
-                    disabledContainerColor = Color(0xFF32284E)
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    disabledContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
                 ),
                 modifier = Modifier.testTag("doc_submit_add_btn")
             ) {
@@ -875,3 +1150,142 @@ By eliminating the constant visual notifications of modern computers and turning
 }
 
 private fun Int.getOrZeroPercent(): Int = if (this < 0) 0 else this
+
+@Composable
+fun MiniPlayer(
+    document: Document,
+    isPlaying: Boolean,
+    progressFraction: Float,
+    onTogglePlayback: () -> Unit,
+    onExpand: () -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(36.dp))
+            .background(Color(0xFF141416))
+            .border(1.dp, Color(0xFF242426), RoundedCornerShape(36.dp))
+            .clickable { onExpand() }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(start = 14.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val localCoverBitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(initialValue = null, key1 = document.coverPath) {
+                value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    document.coverPath?.let { path ->
+                        try {
+                            BitmapFactory.decodeFile(path)?.asImageBitmap()
+                        } catch (e: Exception) {
+                            null
+                        }
+                    }
+                }
+            }
+            
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(RoundedCornerShape(21.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center
+            ) {
+                val coverBitmap = localCoverBitmap
+                if (coverBitmap != null) {
+                    Image(
+                        bitmap = coverBitmap,
+                        contentDescription = "Cover",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.MenuBook,
+                        contentDescription = "Book Icon",
+                        tint = Color.White.copy(alpha = 0.8f),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    text = document.title,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                
+                val subtitleText = if (isPlaying) {
+                    "Reading..."
+                } else {
+                    "Ready"
+                }
+                Text(
+                    text = subtitleText,
+                    fontSize = 11.sp,
+                    color = Color.Gray,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(RoundedCornerShape(21.dp))
+                    .background(MaterialTheme.colorScheme.primary)
+                    .clickable { onTogglePlayback() }
+                    .testTag("mini_play_pause_btn"),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = if (isPlaying) "Pause" else "Play",
+                    tint = Color.White,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(4.dp))
+
+            IconButton(
+                onClick = onClose,
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close Player",
+                    tint = Color.Gray,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+
+        LinearProgressIndicator(
+            progress = progressFraction,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .padding(horizontal = 36.dp)
+                .padding(top = 0.dp)
+                .height(3.dp),
+            color = MaterialTheme.colorScheme.primary,
+            trackColor = Color.White.copy(alpha = 0.15f)
+        )
+    }
+}
+

@@ -13,34 +13,50 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import kotlin.math.sin
 
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import kotlinx.coroutines.launch
+
 @Composable
 fun SoundWaveVisualizer(
     isPlaying: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val infiniteTransition = rememberInfiniteTransition(label = "soundwave")
-    
-    // Animate phase based on time to create a running wave effect
-    val phase by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = (2 * Math.PI).toFloat(),
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "phase"
-    )
+    val phaseAnim = remember { Animatable(0f) }
+    val pulseAnim = remember { Animatable(1f) }
 
-    // Pulse amplitude slightly when playing for visual drama
-    val pulseScale by infiniteTransition.animateFloat(
-        initialValue = 0.8f,
-        targetValue = 1.2f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(800, easing = EaseInOutSine),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "pulse"
-    )
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            launch {
+                phaseAnim.animateTo(
+                    targetValue = (2 * Math.PI).toFloat(),
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(1200, easing = LinearEasing),
+                        repeatMode = RepeatMode.Restart
+                    )
+                )
+            }
+            launch {
+                pulseAnim.animateTo(
+                    targetValue = 1.2f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(800, easing = EaseInOutSine),
+                        repeatMode = RepeatMode.Reverse
+                    )
+                )
+            }
+        } else {
+            launch {
+                phaseAnim.animateTo(0f, tween(500))
+            }
+            launch {
+                pulseAnim.animateTo(1f, tween(500))
+            }
+        }
+    }
+
+    val phase = phaseAnim.value
+    val pulseScale = pulseAnim.value
 
     val primaryColor = MaterialTheme.colorScheme.primary
     val secondaryColor = MaterialTheme.colorScheme.secondary

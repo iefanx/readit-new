@@ -1,9 +1,11 @@
 package com.iefan.readout.tts
 
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import android.util.Log
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -11,6 +13,24 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.util.Locale
 
 class AuraTtsEngine(private val context: Context) : TextToSpeech.OnInitListener {
+
+    companion object {
+        @Volatile
+        var instance: AuraTtsEngine? = null
+            private set
+    }
+
+    var documentTitle: String = ""
+        private set
+
+    var totalCharacters: Int = 0
+        private set
+
+    val currentCharacterIndex: Int
+        get() = _currentWordRange.value?.first ?: (sentences.getOrNull(_currentSentenceIndex.value)?.start ?: 0)
+
+    val sentencesSize: Int
+        get() = sentences.size
 
     private var tts: TextToSpeech? = null
     
@@ -29,7 +49,7 @@ class AuraTtsEngine(private val context: Context) : TextToSpeech.OnInitListener 
     private val _playbackSpeed = MutableStateFlow(1.0f)
     val playbackSpeed = _playbackSpeed.asStateFlow()
 
-    private val _selectedModelTier = MutableStateFlow("BALANCED") // "ULTRA_LIGHT", "BALANCED", "HIGH_FIDELITY"
+    private val _selectedModelTier = MutableStateFlow("HIGH_FIDELITY") // "ULTRA_LIGHT", "BALANCED", "HIGH_FIDELITY"
     val selectedModelTier = _selectedModelTier.asStateFlow()
 
     // Loaded document sentences
@@ -46,6 +66,7 @@ class AuraTtsEngine(private val context: Context) : TextToSpeech.OnInitListener 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     init {
+        instance = this
         initializeTts()
     }
 
@@ -62,6 +83,7 @@ class AuraTtsEngine(private val context: Context) : TextToSpeech.OnInitListener 
                 setupProgressListener()
                 _isInitialized.value = true
                 Log.d("AuraTtsEngine", "TTS initialized successfully.")
+                configureVoiceForTier(_selectedModelTier.value)
             }
         } else {
             Log.e("AuraTtsEngine", "TTS Initialization failed.")
@@ -109,8 +131,10 @@ class AuraTtsEngine(private val context: Context) : TextToSpeech.OnInitListener 
         })
     }
 
-    fun loadDocument(text: String, startSentenceIndex: Int = 0) {
-        sentences = DocumentParser.parse(text)
+    fun loadDocument(sentencesList: List<SpeechSentence>, title: String, startSentenceIndex: Int = 0) {
+        documentTitle = title
+        sentences = sentencesList
+        totalCharacters = sentencesList.lastOrNull()?.end ?: 0
         _currentSentenceIndex.value = startSentenceIndex.coerceIn(0, maxOf(0, sentences.size - 1))
         _currentWordRange.value = null
         stop()
@@ -145,21 +169,7 @@ class AuraTtsEngine(private val context: Context) : TextToSpeech.OnInitListener 
 
     fun setModelTier(tier: String) {
         _selectedModelTier.value = tier
-        // Model customization - simulating change characteristics
-        when (tier) {
-            "ULTRA_LIGHT" -> {
-                // Low footprint, fast response voice settings
-                tts?.setPitch(1.1f)
-            }
-            "BALANCED" -> {
-                // Sweet spot, human voice settings
-                tts?.setPitch(1.0f)
-            }
-            "HIGH_FIDELITY" -> {
-                // High fidelity depth voice settings
-                tts?.setPitch(0.9f)
-            }
-        }
+        configureVoiceForTier(tier)
         // If playing, restart current sentence
         if (_isPlaying.value) {
             speakSentence(_currentSentenceIndex.value)
@@ -173,6 +183,19 @@ class AuraTtsEngine(private val context: Context) : TextToSpeech.OnInitListener 
         _currentWordRange.value = null
         if (_isPlaying.value) {
             speakSentence(targetIdx)
+        }
+    }
+
+    fun seekToCharacter(charIndex: Int) {
+        if (sentences.isEmpty()) return
+        val targetIdx = sentences.indexOfFirst { charIndex in it.start..it.end }
+        if (targetIdx != -1) {
+            seekToSentence(targetIdx)
+        } else {
+            val closest = sentences.minByOrNull { Math.abs(it.start - charIndex) }
+            if (closest != null) {
+                seekToSentence(closest.index)
+            }
         }
     }
 
@@ -191,8 +214,11 @@ class AuraTtsEngine(private val context: Context) : TextToSpeech.OnInitListener 
     private fun speakSentence(index: Int) {
         val sentence = sentences.getOrNull(index) ?: return
         
-        // Ensure tts is configured with current settings
+        // Ensure the correct voice configuration is applied at speech time to prevent race conditions
+        configureVoiceForTier(_selectedModelTier.value)
         tts?.setSpeechRate(_playbackSpeed.value)
+        
+        startPlaybackService()
         
         // We use TextToSpeech.QUEUE_FLUSH to override any ongoing utterance
         val params = android.os.Bundle().apply {
@@ -200,6 +226,17 @@ class AuraTtsEngine(private val context: Context) : TextToSpeech.OnInitListener 
         }
         tts?.speak(sentence.text, TextToSpeech.QUEUE_FLUSH, params, index.toString())
         _isPlaying.value = true
+    }
+
+    private fun startPlaybackService() {
+        val intent = Intent(context, com.iefan.readout.service.PlaybackService::class.java).apply {
+            action = com.iefan.readout.service.PlaybackService.ACTION_START
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(intent)
+        } else {
+            context.startService(intent)
+        }
     }
 
     fun startSleepTimer(minutes: Int) {
@@ -223,9 +260,80 @@ class AuraTtsEngine(private val context: Context) : TextToSpeech.OnInitListener 
         }
     }
 
+    private fun configureVoiceForTier(tier: String) {
+        val currentTts = tts ?: return
+        val availableVoices = try {
+            currentTts.voices
+        } catch (e: Exception) {
+            Log.e("AuraTtsEngine", "Failed to retrieve voices", e)
+            null
+        }
+
+        if (availableVoices.isNullOrEmpty()) {
+            when (tier) {
+                "ULTRA_LIGHT" -> currentTts.setPitch(1.05f)
+                "BALANCED" -> currentTts.setPitch(1.0f)
+                "HIGH_FIDELITY" -> currentTts.setPitch(0.95f)
+            }
+            return
+        }
+
+        val englishVoices = availableVoices.filter {
+            it.locale.language.lowercase() == "en"
+        }
+
+        if (englishVoices.isEmpty()) {
+            currentTts.setLanguage(Locale.US)
+            return
+        }
+
+        val offlineVoices = englishVoices.filter { !it.isNetworkConnectionRequired }
+        val candidateVoices = if (offlineVoices.isNotEmpty()) offlineVoices else englishVoices
+
+        when (tier) {
+            "ULTRA_LIGHT" -> {
+                val defaultVoice = candidateVoices.lastOrNull { !it.isNetworkConnectionRequired } ?: candidateVoices.firstOrNull()
+                if (defaultVoice != null) {
+                    currentTts.voice = defaultVoice
+                }
+                currentTts.setPitch(1.05f)
+            }
+            "BALANCED" -> {
+                val balancedVoice = candidateVoices.firstOrNull { it.name.contains("en-us-x-local", ignoreCase = true) }
+                    ?: candidateVoices.firstOrNull { it.name.contains("local", ignoreCase = true) }
+                    ?: candidateVoices.firstOrNull { it.quality >= 300 }
+                    ?: candidateVoices.firstOrNull()
+                
+                if (balancedVoice != null) {
+                    currentTts.voice = balancedVoice
+                }
+                currentTts.setPitch(1.0f)
+            }
+            "HIGH_FIDELITY" -> {
+                val bestVoice = candidateVoices.firstOrNull { it.name.contains("en-us-x-iol", ignoreCase = true) }
+                    ?: candidateVoices.firstOrNull { it.name.contains("en-gb-x-iol", ignoreCase = true) }
+                    ?: candidateVoices.firstOrNull { it.name.contains("en-us-x-sfg", ignoreCase = true) }
+                    ?: candidateVoices.firstOrNull { it.name.contains("en-us-x-iom", ignoreCase = true) }
+                    ?: candidateVoices.firstOrNull { it.name.contains("en-us-x-iog", ignoreCase = true) }
+                    ?: candidateVoices.firstOrNull { it.quality >= 400 }
+                    ?: candidateVoices.firstOrNull { it.quality >= 300 }
+                    ?: candidateVoices.firstOrNull()
+
+                if (bestVoice != null) {
+                    currentTts.voice = bestVoice
+                }
+                currentTts.setPitch(1.0f)
+            }
+        }
+    }
+
     fun shutdown() {
         timerJob?.cancel()
         scope.cancel()
         tts?.shutdown()
+        tts = null
+        if (instance == this) {
+            instance = null
+        }
     }
 }

@@ -11,8 +11,9 @@ data class Document(
     val sourceUrl: String? = null,
     val addedDate: Long = System.currentTimeMillis(),
     val playbackPosition: Int = 0, // last character or paragraph index
-    val selectedModelTier: String = "BALANCED", // "ULTRA_LIGHT", "BALANCED", "HIGH_FIDELITY"
+    val selectedModelTier: String = "HIGH_FIDELITY", // "ULTRA_LIGHT", "BALANCED", "HIGH_FIDELITY"
     val playbackSpeed: Float = 1.0f,
     val coverPath: String? = null,
-    val lastReadTime: Long = System.currentTimeMillis()
+    val lastReadTime: Long = System.currentTimeMillis(),
+    val isFavorite: Boolean = false
 )
