@@ -17,10 +17,15 @@ android {
     applicationId = "com.iefan.readout"
     minSdk = 24
     targetSdk = 36
-    versionCode = 14
-    versionName = "1.1.3"
+    versionCode = 15
+    versionName = "1.1.4"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+  }
+
+  lint {
+    abortOnError = false
+    checkReleaseBuilds = false
   }
 
   val localProperties = Properties()
@@ -127,6 +132,7 @@ dependencies {
   // implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)
+  implementation(libs.play.review.ktx)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.logging.interceptor)

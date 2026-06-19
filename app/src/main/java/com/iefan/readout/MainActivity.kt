@@ -20,6 +20,7 @@ import com.iefan.readout.ui.screens.*
 import com.iefan.readout.ui.theme.MyApplicationTheme
 import com.iefan.readout.viewmodel.ReadoutViewModel
 import com.iefan.readout.data.Chapter
+import com.iefan.readout.utils.InAppReviewHelper
 
 class MainActivity : ComponentActivity() {
     private val requestNotificationPermissionLauncher = registerForActivityResult(
@@ -87,6 +88,29 @@ class MainActivity : ComponentActivity() {
                     importError?.let { msg ->
                         snackbarHostState.showSnackbar(msg)
                         viewModel.clearImportError()
+                    }
+                }
+
+                var lastOpenedDocId by remember { mutableStateOf<Long?>(null) }
+                var achievedHighProgress by remember { mutableStateOf(false) }
+
+                LaunchedEffect(progressFraction) {
+                    if (progressFraction > 0.85f) {
+                        achievedHighProgress = true
+                    }
+                }
+
+                LaunchedEffect(activeDoc) {
+                    val doc = activeDoc
+                    if (doc != null) {
+                        lastOpenedDocId = doc.id
+                        achievedHighProgress = false
+                    } else {
+                        if (lastOpenedDocId != null && achievedHighProgress) {
+                            InAppReviewHelper.checkAndPromptReview(this@MainActivity)
+                        }
+                        lastOpenedDocId = null
+                        achievedHighProgress = false
                     }
                 }
 
