@@ -5,6 +5,7 @@ import com.itextpdf.text.pdf.SimpleBookmark
 import org.jsoup.Jsoup
 import java.io.File
 import java.util.regex.Pattern
+import com.iefan.readout.utils.TextCleaner
 
 data class ChapterCandidate(
     val title: String,
@@ -14,7 +15,8 @@ data class ChapterCandidate(
 object ChapterExtractor {
 
     // 1. Universal Text/Heading-based Sniffer
-    fun extractChaptersFromText(content: String): List<ChapterCandidate> {
+    fun extractChaptersFromText(rawContent: String): List<ChapterCandidate> {
+        val content = TextCleaner.clean(rawContent)
         val candidates = mutableListOf<ChapterCandidate>()
         val lines = content.split("\n")
         var currentOffset = 0

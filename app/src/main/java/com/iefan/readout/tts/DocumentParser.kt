@@ -1,5 +1,7 @@
 package com.iefan.readout.tts
 
+import com.iefan.readout.utils.TextCleaner
+
 data class SpeechWord(
     val text: String,
     val start: Int, // relative to the full text
@@ -16,7 +18,8 @@ data class SpeechSentence(
 )
 
 object DocumentParser {
-    fun parse(text: String): List<SpeechSentence> {
+    fun parse(rawText: String): List<SpeechSentence> {
+        val text = TextCleaner.clean(rawText)
         val sentences = mutableListOf<SpeechSentence>()
         if (text.isBlank()) return sentences
 
