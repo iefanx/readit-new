@@ -6,6 +6,12 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -23,6 +29,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.res.painterResource
+import com.iefan.readout.R
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -56,7 +65,7 @@ fun MainLibraryView(
     onDeleteDocument: (Document) -> Unit,
     onEditDocument: (Long, String, Uri?, Boolean) -> Unit = { _, _, _, _ -> },
     onAddDocument: (String, String, String?, String?) -> Unit,
-    onOpenVoiceSelector: () -> Unit,
+    onOpenSettings: () -> Unit,
     onOpenLibrary: () -> Unit,
     onToggleFavorite: (Document) -> Unit,
     onAddDocumentToCollection: (Long, Long) -> Unit,
@@ -74,6 +83,7 @@ fun MainLibraryView(
     onSkipForward: () -> Unit = {},
     onExpandPlayer: () -> Unit = {},
     onCloseMiniPlayer: () -> Unit = {},
+    onSeekToFraction: (Float) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showAddDialog by remember { mutableStateOf(false) }
@@ -122,12 +132,13 @@ fun MainLibraryView(
                             .fillMaxWidth()
                             .padding(start = 12.dp)
                     ) {
-                        Text(
-                            text = "▲",
-                            color = Color.White,
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(end = 8.dp)
+                        Icon(
+                            painter = painterResource(id = R.drawable.ic_logo),
+                            contentDescription = "Readout Logo",
+                            tint = Color.White,
+                            modifier = Modifier
+                                .size(22.dp)
+                                .padding(end = 8.dp)
                         )
                         Text(
                             text = "Readout",
@@ -146,10 +157,10 @@ fun MainLibraryView(
                             tint = Color.White
                         )
                     }
-                    IconButton(onClick = onOpenVoiceSelector) {
+                    IconButton(onClick = onOpenSettings) {
                         Icon(
                             imageVector = Icons.Default.Tune,
-                            contentDescription = "Voice Selector",
+                            contentDescription = "Readout Settings",
                             tint = Color.White
                         )
                     }
@@ -170,7 +181,7 @@ fun MainLibraryView(
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 24.dp),
+                    .padding(horizontal = 12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(28.dp)
             ) {
@@ -990,7 +1001,7 @@ fun AddDocumentDialog(
                                         content = """For years, running large neural network architectures meant piping personal parameters back and forth to giant server racks hosted in centralized clouds. Today, modern micro-onnx ran pipelines make running speech synthesizers directly inside your pocket fully real. 
 
 This is incredibly important for mobile computers, meaning zero networking costs, absolute tracking privacy, and uninterrupted playback inside planes or subway commutes."""
-                                        url = "https://example.com/edge-ai-revolution"
+                                        url = ""
                                     },
                                     colors = ButtonDefaults.buttonColors(
                                         containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
@@ -1010,7 +1021,7 @@ This is incredibly important for mobile computers, meaning zero networking costs
                                         content = """Achieving professional mastery is rarely about running faster; it is about learning how to calm the noise. Flow states happen when there is a perfect equilibrium between the difficulty of a challenge and your absolute dedicated focus. 
 
 By eliminating the constant visual notifications of modern computers and turning text-heavy articles into an elegant audio-stream, you can consume long-form thinking while resting your eyes and keeping the mind in a deep flow channel."""
-                                        url = "https://example.com/mindful-computing"
+                                        url = ""
                                     },
                                     colors = ButtonDefaults.buttonColors(
                                         containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
@@ -1112,7 +1123,7 @@ By eliminating the constant visual notifications of modern computers and turning
                         }
                         AddInputType.PASTE -> {
                             if (content.isNotBlank()) {
-                                onAdd(title, content, url.ifBlank { null })
+                                onAdd(title, content, null)
                             }
                         }
                         AddInputType.URL -> {
@@ -1152,6 +1163,67 @@ By eliminating the constant visual notifications of modern computers and turning
 private fun Int.getOrZeroPercent(): Int = if (this < 0) 0 else this
 
 @Composable
+private fun SeekableProgressBar(
+    progress: Float,
+    onSeek: (Float) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val primaryColor = MaterialTheme.colorScheme.primary
+    val trackColor = Color.White.copy(alpha = 0.15f)
+
+    Canvas(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(16.dp)
+            .pointerInput(Unit) {
+                detectTapGestures { offset ->
+                    val fraction = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
+                    onSeek(fraction)
+                }
+            }
+            .pointerInput(Unit) {
+                detectDragGestures { change, _ ->
+                    val fraction = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                    onSeek(fraction)
+                }
+            }
+    ) {
+        val h = size.height
+        val centerY = h / 2
+        val strokeWidthVal = 4.dp.toPx()
+        val thumbRadius = 6.dp.toPx()
+
+        // Draw track
+        drawLine(
+            color = trackColor,
+            start = Offset(0f, centerY),
+            end = Offset(size.width, centerY),
+            strokeWidth = strokeWidthVal,
+            cap = StrokeCap.Round
+        )
+
+        // Draw progress
+        val progressX = progress * size.width
+        if (progressX > 0f) {
+            drawLine(
+                color = primaryColor,
+                start = Offset(0f, centerY),
+                end = Offset(progressX, centerY),
+                strokeWidth = strokeWidthVal,
+                cap = StrokeCap.Round
+            )
+        }
+
+        // Draw thumb circle
+        drawCircle(
+            color = primaryColor,
+            radius = thumbRadius,
+            center = Offset(progressX, centerY)
+        )
+    }
+}
+
+@Composable
 fun MiniPlayer(
     document: Document,
     isPlaying: Boolean,
@@ -1161,131 +1233,143 @@ fun MiniPlayer(
     onClose: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(36.dp))
-            .background(Color(0xFF141416))
-            .border(1.dp, Color(0xFF242426), RoundedCornerShape(36.dp))
-            .clickable { onExpand() }
-    ) {
-        Row(
+    Box(modifier = modifier) {
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(start = 14.dp, end = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .clip(RoundedCornerShape(36.dp))
+                .background(Color(0xD9141416))
+                .border(1.dp, Color(0x99242426), RoundedCornerShape(36.dp))
+                .clickable { onExpand() }
         ) {
-            val localCoverBitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(initialValue = null, key1 = document.coverPath) {
-                value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    document.coverPath?.let { path ->
-                        try {
-                            BitmapFactory.decodeFile(path)?.asImageBitmap()
-                        } catch (e: Exception) {
-                            null
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(start = 14.dp, end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val localCoverBitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(initialValue = null, key1 = document.coverPath) {
+                    value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        document.coverPath?.let { path ->
+                            try {
+                                BitmapFactory.decodeFile(path)?.asImageBitmap()
+                            } catch (e: Exception) {
+                                null
+                            }
                         }
                     }
                 }
-            }
-            
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .clip(RoundedCornerShape(21.dp))
-                    .background(MaterialTheme.colorScheme.primaryContainer),
-                contentAlignment = Alignment.Center
-            ) {
-                val coverBitmap = localCoverBitmap
-                if (coverBitmap != null) {
-                    Image(
-                        bitmap = coverBitmap,
-                        contentDescription = "Cover",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Default.MenuBook,
-                        contentDescription = "Book Icon",
-                        tint = Color.White.copy(alpha = 0.8f),
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.width(12.dp))
-
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.Center
-            ) {
-                Text(
-                    text = document.title,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(2.dp))
                 
-                val subtitleText = if (isPlaying) {
-                    "Reading..."
-                } else {
-                    "Ready"
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(RoundedCornerShape(21.dp))
+                        .background(MaterialTheme.colorScheme.primaryContainer),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val coverBitmap = localCoverBitmap
+                    if (coverBitmap != null) {
+                        Image(
+                            bitmap = coverBitmap,
+                            contentDescription = "Cover",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.MenuBook,
+                            contentDescription = "Book Icon",
+                            tint = Color.White.copy(alpha = 0.8f),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                 }
-                Text(
-                    text = subtitleText,
-                    fontSize = 11.sp,
-                    color = Color.Gray,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
 
-            Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(12.dp))
 
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .clip(RoundedCornerShape(21.dp))
-                    .background(MaterialTheme.colorScheme.primary)
-                    .clickable { onTogglePlayback() }
-                    .testTag("mini_play_pause_btn"),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = if (isPlaying) "Pause" else "Play",
-                    tint = Color.White,
-                    modifier = Modifier.size(22.dp)
-                )
-            }
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = document.title,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    
+                    val percentage = (progressFraction * 100).toInt().coerceIn(0, 100)
+                    val wordsRemaining = remember(document.content, progressFraction) {
+                        val totalWords = document.content.split(Regex("\\s+")).filter { it.isNotBlank() }.size
+                        ((1f - progressFraction) * totalWords).toInt().coerceAtLeast(0)
+                    }
+                    val timeRemainingStr = remember(wordsRemaining, document.playbackSpeed) {
+                        val speed = if (document.playbackSpeed > 0f) document.playbackSpeed else 1.0f
+                        val totalSeconds = (wordsRemaining / (2.5f * speed)).toInt()
+                        if (totalSeconds <= 0) {
+                            "0s remaining"
+                        } else if (totalSeconds < 60) {
+                            "${totalSeconds}s remaining"
+                        } else {
+                            val totalMinutes = totalSeconds / 60
+                            if (totalMinutes < 60) {
+                                "${totalMinutes}m remaining"
+                            } else {
+                                val hours = totalMinutes / 60
+                                val mins = totalMinutes % 60
+                                if (mins > 0) {
+                                    "${hours}h ${mins}m remaining"
+                                } else {
+                                    "${hours}h remaining"
+                                }
+                            }
+                        }
+                    }
+                    Text(
+                        text = "$percentage% / $timeRemainingStr",
+                        fontSize = 11.sp,
+                        color = Color.Gray,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
 
-            Spacer(modifier = Modifier.width(4.dp))
+                Spacer(modifier = Modifier.width(8.dp))
 
-            IconButton(
-                onClick = onClose,
-                modifier = Modifier.size(36.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Close,
-                    contentDescription = "Close Player",
-                    tint = Color.Gray,
-                    modifier = Modifier.size(18.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(RoundedCornerShape(21.dp))
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.85f))
+                        .clickable { onTogglePlayback() }
+                        .testTag("mini_play_pause_btn"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = if (isPlaying) "Pause" else "Play",
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(4.dp))
+
+                IconButton(
+                    onClick = onClose,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close Player",
+                        tint = Color.Gray.copy(alpha = 0.7f),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
             }
         }
-
-        LinearProgressIndicator(
-            progress = progressFraction,
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .padding(horizontal = 36.dp)
-                .padding(top = 0.dp)
-                .height(3.dp),
-            color = MaterialTheme.colorScheme.primary,
-            trackColor = Color.White.copy(alpha = 0.15f)
-        )
     }
 }
-

@@ -10,7 +10,7 @@ val OledOnBg = Color(0xFFFFFFFF)
 val OledOnSurface = Color(0xFFF1F1F4)
 val OledOnSurfaceVariant = Color(0xFF9E9EAF) // Elegant grey for secondary texts/subtitles
 
-val OledPrimary = Color(0xFF2F66F6) // Premium Royal Blue
+val OledPrimary = Color(0xFF2E43FA) // Premium Royal Blue
 val OledOnPrimary = Color(0xFFFFFFFF) // White text on primary buttons
 val OledPrimaryContainer = Color(0xFF0F2C84) // Deep Navy Blue container for highlights
 val OledOnPrimaryContainer = Color(0xFFDBEAFE) // Soft blue on container

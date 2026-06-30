@@ -14,7 +14,7 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import com.iefan.readout.MainActivity
-import com.iefan.readout.tts.AuraTtsEngine
+import com.iefan.readout.tts.ReadoutTtsEngine
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collect
 
@@ -33,8 +33,6 @@ class PlaybackService : Service() {
         const val ACTION_SKIP_FORWARD = "com.iefan.readout.ACTION_SKIP_FORWARD"
         const val ACTION_SKIP_BACKWARD = "com.iefan.readout.ACTION_SKIP_BACKWARD"
         const val ACTION_STOP = "com.iefan.readout.ACTION_STOP"
-        
-        const val CHARS_PER_SECOND = 15L
     }
 
     override fun onCreate() {
@@ -44,24 +42,19 @@ class PlaybackService : Service() {
         mediaSession = MediaSession(this, "ReadoutPlaybackSession").apply {
             setCallback(object : MediaSession.Callback() {
                 override fun onPlay() {
-                    AuraTtsEngine.instance?.startPlayback()
+                    ReadoutTtsEngine.instance?.startPlayback()
                 }
 
                 override fun onPause() {
-                    AuraTtsEngine.instance?.pausePlayback()
+                    ReadoutTtsEngine.instance?.pausePlayback()
                 }
 
                 override fun onSkipToNext() {
-                    AuraTtsEngine.instance?.skipForward15s()
+                    ReadoutTtsEngine.instance?.skipForward15s()
                 }
 
                 override fun onSkipToPrevious() {
-                    AuraTtsEngine.instance?.skipBackward15s()
-                }
-
-                override fun onSeekTo(pos: Long) {
-                    val charIndex = (pos * CHARS_PER_SECOND) / 1000L
-                    AuraTtsEngine.instance?.seekToCharacter(charIndex.toInt())
+                    ReadoutTtsEngine.instance?.skipBackward15s()
                 }
             })
             isActive = true
@@ -82,7 +75,7 @@ class PlaybackService : Service() {
                 updateMediaSessionState()
             }
             ACTION_PLAY_PAUSE -> {
-                AuraTtsEngine.instance?.let { engine ->
+                ReadoutTtsEngine.instance?.let { engine ->
                     if (engine.isPlaying.value) {
                         engine.pausePlayback()
                     } else {
@@ -91,13 +84,13 @@ class PlaybackService : Service() {
                 }
             }
             ACTION_SKIP_FORWARD -> {
-                AuraTtsEngine.instance?.skipForward15s()
+                ReadoutTtsEngine.instance?.skipForward15s()
             }
             ACTION_SKIP_BACKWARD -> {
-                AuraTtsEngine.instance?.skipBackward15s()
+                ReadoutTtsEngine.instance?.skipBackward15s()
             }
             ACTION_STOP -> {
-                AuraTtsEngine.instance?.stop()
+                ReadoutTtsEngine.instance?.stop()
                 stopForegroundService()
             }
         }
@@ -111,7 +104,7 @@ class PlaybackService : Service() {
     private fun startUpdatesObserver() {
         updatesJob?.cancel()
         updatesJob = serviceScope.launch {
-            val engine = AuraTtsEngine.instance
+            val engine = ReadoutTtsEngine.instance
             if (engine != null) {
                 launch {
                     engine.isPlaying.collect {
@@ -120,7 +113,7 @@ class PlaybackService : Service() {
                     }
                 }
                 launch {
-                    engine.currentSentenceIndex.collect {
+                    engine.currentSentenceIndex.collect { index ->
                         updateNotification()
                         updateMediaSessionState()
                     }
@@ -131,7 +124,7 @@ class PlaybackService : Service() {
                     }
                 }
             } else {
-                Log.w("PlaybackService", "AuraTtsEngine.instance is null during updates observation. Stopping service.")
+                Log.w("PlaybackService", "ReadoutTtsEngine.instance is null during updates observation. Stopping service.")
                 stopForegroundService()
             }
         }
@@ -162,7 +155,7 @@ class PlaybackService : Service() {
     }
 
     private fun updateNotification() {
-        val engine = AuraTtsEngine.instance ?: return
+        val engine = ReadoutTtsEngine.instance ?: return
         val isPlaying = engine.isPlaying.value
         val title = engine.documentTitle.ifBlank { "Readout Player" }
 
@@ -232,18 +225,17 @@ class PlaybackService : Service() {
     }
 
     private fun updateMediaSessionState() {
-        val engine = AuraTtsEngine.instance ?: return
+        val engine = ReadoutTtsEngine.instance ?: return
         val isPlaying = engine.isPlaying.value
-        val position = if (engine.totalCharacters > 0) (engine.currentCharacterIndex.toLong() * 1000L) / CHARS_PER_SECOND else 0L
-        val duration = if (engine.totalCharacters > 0) (engine.totalCharacters.toLong() * 1000L) / CHARS_PER_SECOND else 0L
+        val position = engine.currentCharacterIndex.toLong()
+        val duration = engine.totalCharacters.toLong()
 
         val stateBuilder = PlaybackState.Builder()
             .setActions(
                 PlaybackState.ACTION_PLAY or
                 PlaybackState.ACTION_PAUSE or
                 PlaybackState.ACTION_SKIP_TO_NEXT or
-                PlaybackState.ACTION_SKIP_TO_PREVIOUS or
-                PlaybackState.ACTION_SEEK_TO
+                PlaybackState.ACTION_SKIP_TO_PREVIOUS
             )
             .setState(
                 if (isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,

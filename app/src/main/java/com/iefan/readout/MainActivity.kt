@@ -14,8 +14,9 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.iefan.readout.ui.components.VoiceSelectionDialog
+import com.iefan.readout.ui.components.SettingsDialog
 import com.iefan.readout.ui.screens.*
 import com.iefan.readout.ui.theme.MyApplicationTheme
 import com.iefan.readout.viewmodel.ReadoutViewModel
@@ -48,22 +49,25 @@ class MainActivity : ComponentActivity() {
                 val viewModel: ReadoutViewModel = viewModel()
                 
                 // Collect reactive StateFlows from ViewModel
-                val allDocuments by viewModel.allDocuments.collectAsState()
-                val isLibraryOpen by viewModel.isLibraryOpen.collectAsState()
-                val allCollections by viewModel.allCollections.collectAsState()
-                val allCrossRefs by viewModel.allCrossRefs.collectAsState()
-                val activeDoc by viewModel.activeDocument.collectAsState()
-                val sentences by viewModel.activeSentences.collectAsState()
-                val isPlaying by viewModel.isPlaying.collectAsState()
-                val currentIndex by viewModel.currentSentenceIndex.collectAsState()
-                val wordRange by viewModel.currentWordRange.collectAsState()
-                val speed by viewModel.playbackSpeed.collectAsState()
-                val modelTier by viewModel.selectedModelTier.collectAsState()
-                val sleepTimerMinutes by viewModel.sleepTimerMinutes.collectAsState()
-                val remainingSeconds by viewModel.sleepTimerRemainingSeconds.collectAsState()
-                val isImporting by viewModel.isImporting.collectAsState()
-                val isPlayerExpanded by viewModel.isPlayerExpanded.collectAsState()
-                val activeChapters by viewModel.activeChapters.collectAsState()
+                val allDocuments by viewModel.allDocuments.collectAsStateWithLifecycle()
+                val isLibraryOpen by viewModel.isLibraryOpen.collectAsStateWithLifecycle()
+                val allCollections by viewModel.allCollections.collectAsStateWithLifecycle()
+                val allCrossRefs by viewModel.allCrossRefs.collectAsStateWithLifecycle()
+                val activeDoc by viewModel.activeDocument.collectAsStateWithLifecycle()
+                val sentences by viewModel.activeSentences.collectAsStateWithLifecycle()
+                val isPlaying by viewModel.isPlaying.collectAsStateWithLifecycle()
+                val currentIndex by viewModel.currentSentenceIndex.collectAsStateWithLifecycle()
+                val wordRange by viewModel.currentWordRange.collectAsStateWithLifecycle()
+                val speed by viewModel.playbackSpeed.collectAsStateWithLifecycle()
+                val sleepTimerMinutes by viewModel.sleepTimerMinutes.collectAsStateWithLifecycle()
+                val remainingSeconds by viewModel.sleepTimerRemainingSeconds.collectAsStateWithLifecycle()
+                val selectedVoiceId by viewModel.selectedVoiceId.collectAsStateWithLifecycle()
+                val availableVoices by viewModel.availableVoices.collectAsStateWithLifecycle()
+                val translationTargetLang by viewModel.translationTargetLang.collectAsStateWithLifecycle()
+
+                val isImporting by viewModel.isImporting.collectAsStateWithLifecycle()
+                val isPlayerExpanded by viewModel.isPlayerExpanded.collectAsStateWithLifecycle()
+                val activeChapters by viewModel.activeChapters.collectAsStateWithLifecycle()
 
                 val progressFraction = remember(wordRange, sentences, currentIndex) {
                     val totalChars = if (sentences.isNotEmpty()) sentences.last().end else 0
@@ -71,7 +75,7 @@ class MainActivity : ComponentActivity() {
                     if (totalChars > 0) currentCharIndex.toFloat() / totalChars else 0f
                 }
 
-                var showVoiceSelector by remember { mutableStateOf(false) }
+                var showSettings by remember { mutableStateOf(false) }
 
                 BackHandler(enabled = isPlayerExpanded) {
                     viewModel.minimizePlayer()
@@ -82,7 +86,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val snackbarHostState = remember { SnackbarHostState() }
-                val importError by viewModel.importError.collectAsState()
+                val importError by viewModel.importError.collectAsStateWithLifecycle()
 
                 LaunchedEffect(importError) {
                     importError?.let { msg ->
@@ -152,7 +156,7 @@ class MainActivity : ComponentActivity() {
                                 onAddDocument = { title, content, sUrl, coverPath ->
                                     viewModel.addNewBook(title, content, sUrl, coverPath)
                                 },
-                                onOpenVoiceSelector = { showVoiceSelector = true },
+                                onOpenSettings = { showSettings = true },
                                 onOpenLibrary = { viewModel.setLibraryOpen(true) },
                                 onToggleFavorite = { doc -> viewModel.toggleFavorite(doc) },
                                 onAddDocumentToCollection = { docId, colId -> viewModel.addDocumentToCollection(docId, colId) },
@@ -174,7 +178,8 @@ class MainActivity : ComponentActivity() {
                                 onTogglePlayback = { viewModel.togglePlayback() },
                                 onSkipForward = { viewModel.skipForward() },
                                 onExpandPlayer = { viewModel.expandPlayer() },
-                                onCloseMiniPlayer = { viewModel.deselectDocument() }
+                                onCloseMiniPlayer = { viewModel.deselectDocument() },
+                                onSeekToFraction = { fraction -> viewModel.seekToFraction(fraction) }
                             )
                         }
                     } else {
@@ -202,16 +207,21 @@ class MainActivity : ComponentActivity() {
                             onSeekToSentence = { index -> viewModel.seekToSentence(index) },
                             onSpeedChanged = { nextSpeed -> viewModel.setPlaybackSpeed(nextSpeed) },
                             onSleepTimerChanged = { m -> viewModel.startSleepTimer(m) },
-                            onSeekToChapter = { chapter -> viewModel.seekToChapter(chapter) }
+                            onSeekToChapter = { chapter -> viewModel.seekToChapter(chapter) },
+                            isTranslating = translationTargetLang != "none",
+                            onSeekToFraction = { fraction -> viewModel.seekToFraction(fraction) }
                         )
                     }
 
-                    // Voice selection dialog overlay
-                    if (showVoiceSelector) {
-                        VoiceSelectionDialog(
-                            currentTier = modelTier,
-                            onSelectTier = { tier -> viewModel.setModelTier(tier) },
-                            onDismiss = { showVoiceSelector = false }
+                    // Settings dialog overlay
+                    if (showSettings) {
+                        SettingsDialog(
+                            selectedVoiceId = selectedVoiceId,
+                            availableVoices = availableVoices,
+                            onSelectVoice = { voiceId -> viewModel.setSelectedVoiceId(voiceId) },
+                            translationTargetLang = translationTargetLang,
+                            onSelectTranslationLang = { lang -> viewModel.setTranslationTargetLang(lang) },
+                            onDismiss = { showSettings = false }
                         )
                     }
                 }

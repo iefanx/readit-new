@@ -10,9 +10,11 @@ import android.os.ParcelFileDescriptor
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.iefan.readout.data.*
-import com.iefan.readout.tts.AuraTtsEngine
+import com.iefan.readout.tts.ReadoutTtsEngine
 import com.iefan.readout.tts.DocumentParser
 import com.iefan.readout.tts.SpeechSentence
+import com.iefan.readout.tts.VoiceInfo
+import com.iefan.readout.tts.VoiceStatus
 import com.itextpdf.text.pdf.PdfReader
 import com.itextpdf.text.pdf.parser.PdfTextExtractor
 import org.jsoup.Jsoup
@@ -37,7 +39,7 @@ data class ExtractedDocument(val content: String, val chapters: List<ChapterCand
 class ReadoutViewModel(application: Application) : AndroidViewModel(application) {
 
     private val documentRepository: DocumentRepository
-    private val ttsEngine: AuraTtsEngine
+    private val ttsEngine: ReadoutTtsEngine
 
     // All books / articles in library
     val allDocuments: StateFlow<List<Document>>
@@ -81,6 +83,9 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
     val selectedModelTier: StateFlow<String>
     val sleepTimerMinutes: StateFlow<Int>
     val sleepTimerRemainingSeconds: StateFlow<Int>
+    val selectedVoiceId: StateFlow<String>
+    val availableVoices: StateFlow<List<VoiceInfo>>
+    val translationTargetLang: StateFlow<String>
 
     // Hardware Benchmark flow
     private val _benchmarkProgress = MutableStateFlow<Float?>(null)
@@ -92,11 +97,15 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
     init {
         val database = AppDatabase.getDatabase(application)
         documentRepository = DocumentRepository(database.documentDao())
-        ttsEngine = AuraTtsEngine(application)
+        ttsEngine = ReadoutTtsEngine(application)
 
         val sharedPrefs = application.getSharedPreferences("readout_prefs", android.content.Context.MODE_PRIVATE)
         val savedTier = sharedPrefs.getString("selected_voice_tier", "HIGH_FIDELITY") ?: "HIGH_FIDELITY"
         ttsEngine.setModelTier(savedTier)
+        val savedVoiceId = sharedPrefs.getString("selected_voice_id", "default") ?: "default"
+        ttsEngine.setSelectedVoiceId(savedVoiceId)
+        val savedTranslation = sharedPrefs.getString("translation_target_lang", "none") ?: "none"
+        ttsEngine.setTranslationTargetLang(savedTranslation)
 
         allDocuments = documentRepository.allDocuments
             .stateIn(
@@ -127,6 +136,9 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
         selectedModelTier = ttsEngine.selectedModelTier
         sleepTimerMinutes = ttsEngine.sleepTimerMinutes
         sleepTimerRemainingSeconds = ttsEngine.sleepTimerRemainingSeconds
+        selectedVoiceId = ttsEngine.selectedVoiceId
+        availableVoices = ttsEngine.availableVoices
+        translationTargetLang = ttsEngine.translationTargetLang
 
         // Listen for sentence changes to update Room position with a debounce of 3 seconds
         viewModelScope.launch {
@@ -136,50 +148,107 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
                     if (sentencesList.isNotEmpty() && index < sentencesList.size) {
                         val currentSentence = sentencesList[index]
                         delay(3000)
-                        documentRepository.updatePlaybackPosition(doc.id, currentSentence.start)
+                        val stillSameDocument = activeDocument.value?.id == doc.id
+                        val stillSameSentence = currentSentenceIndex.value == index
+                        if (isPlaying.value && stillSameDocument && stillSameSentence) {
+                            documentRepository.updatePlaybackPosition(doc.id, currentSentence.start)
+                        }
                     }
                 }
             }
         }
 
-        // Trigger preloads if db is empty and we haven't preloaded before
+        // Trigger preloads if we haven't preloaded v3 samples before
         viewModelScope.launch {
             allDocuments.collect { list ->
-                val hasPreloaded = sharedPrefs.getBoolean("has_preloaded_samples", false)
-                if (list.isEmpty() && !hasPreloaded) {
+                val hasPreloaded = sharedPrefs.getBoolean("has_preloaded_samples_v3", false)
+                if (!hasPreloaded) {
+                    // Delete old default sample books to clean up the library list
+                    for (doc in list) {
+                        if (doc.title == "The Art of Focus" || 
+                            doc.title == "A Brief History of Speed Audio" ||
+                            doc.title == "About this app, what this app can do" ||
+                            doc.title == "The Odyssey") {
+                            documentRepository.delete(doc)
+                        }
+                    }
                     preloadSampleBooks()
-                    sharedPrefs.edit().putBoolean("has_preloaded_samples", true).apply()
+                    sharedPrefs.edit().putBoolean("has_preloaded_samples_v3", true).apply()
                 }
             }
         }
     }
 
     private suspend fun preloadSampleBooks() {
-        val samples = listOf(
-            Document(
-                title = "The Art of Focus",
-                content = """In an age of constant notification ping-backs and infinite scrolling feeds, deep focus has become the ultimate cognitive commodity. True intellectual output is born from selective ignorance—the ability to shut down background cycles and direct your entire working memory onto a single problem channel. 
-
-As a local-first system, this reading session contains zero remote trackers, zero cloud subscription walls, and complete offline privacy. 
-
-This is Readout. To begin your focused auditory journey, try swiping up on the bottom active player bar to view real-time karaoke sentence tracking, or double tap on any sentence on that view to immediately skip your speech engine to that exact location. Playback speeds can be scaled fluidly from 0.5x up to 4.5x with fully compensated time-pitch dynamics.""",
-                sourceUrl = "Readout Sample Archive",
-                selectedModelTier = "HIGH_FIDELITY",
-                playbackSpeed = 1.0f
-            ),
-            Document(
-                title = "A Brief History of Speed Audio",
-                content = """Slowing down or speeding up audio has been a tool for learning since magnetic tape recorders allowed mechanical pitch adjustments. However, traditional speed alterations resulted in Chipmunk tones because the frequency domain shifted as the time domain compressed. 
-
-With modern local-first DSP algorithms, digital time-stretching decouples speed from frequency entirely. Readout uses hardware-efficient offline processing models (recommending Ultra-Light, Balanced, or High-Fidelity tiers depending on core configurations) to preserve rich natural voice pitch, even when playback speed is driven up to a blistering 4.5 times normal listening speed.""",
-                sourceUrl = "DSP Learning Chronicles",
-                selectedModelTier = "HIGH_FIDELITY",
-                playbackSpeed = 1.2f
-            )
-        )
-        for (sample in samples) {
-            documentRepository.insert(sample)
+        val context = getApplication<Application>()
+        
+        // 1. Load Odyssey from Assets
+        val odysseyDoc = withContext(Dispatchers.IO) {
+            try {
+                val tempFile = File(context.cacheDir, "The_Odyssey_by_Homer.epub")
+                context.assets.open("The Odyssey by Homer.epub").use { input ->
+                    tempFile.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                val extracted = extractTextFromEpub(tempFile)
+                tempFile.delete()
+                
+                Document(
+                    title = "The Odyssey",
+                    content = extracted.content.ifBlank { "Error parsing The Odyssey." },
+                    sourceUrl = "Homer",
+                    selectedModelTier = "HIGH_FIDELITY",
+                    playbackSpeed = 1.0f
+                ) to extracted.chapters
+            } catch (e: Exception) {
+                e.printStackTrace()
+                Document(
+                    title = "The Odyssey",
+                    content = "Error loading The Odyssey from assets.",
+                    sourceUrl = "Homer",
+                    selectedModelTier = "HIGH_FIDELITY",
+                    playbackSpeed = 1.0f
+                ) to emptyList<ChapterCandidate>()
+            }
         }
+
+        // 2. Load "About this app" document
+        val aboutDoc = Document(
+            title = "About this app, what this app can do",
+            content = """Welcome to Readout, your premium, distraction-free reading assistant.
+
+Here is what this app can do:
+
+1. Hybrid Speech System: You can choose between using Google's high-fidelity online Text-to-Speech models (requires an active network connection) or falling back to standard offline voices for 100% network-free playback.
+
+2. Built-in Translation: Upload a document in any language and listen to it seamlessly translated into your preferred language of choice.
+
+3. Voice & Speech Preferences: Customize your listening experience by selecting from a wide range of available voices to hear the narration in your preferred speech style.
+
+4. Sleep Countdown Timer: Set a sleep timer from the settings panel to automatically pause audio playback after a specified amount of time.
+
+5. Interactive Navigation & Speed Control: Adjust playback speeds fluidly from 0.5x up to 4.5x. Tap or drag the progress bar to skip, double-tap on any sentence to jump the reader to that location, and view cumulative follow-along karaoke highlights as you listen.""",
+            sourceUrl = "Readout User Guide",
+            selectedModelTier = "HIGH_FIDELITY",
+            playbackSpeed = 1.0f
+        )
+
+        // Insert Odyssey
+        val odysseyId = documentRepository.insert(odysseyDoc.first)
+        if (odysseyDoc.second.isNotEmpty()) {
+            val dbChapters = odysseyDoc.second.map { candidate ->
+                Chapter(
+                    documentId = odysseyId,
+                    title = candidate.title,
+                    startCharOffset = candidate.charOffset
+                )
+            }
+            documentRepository.insertChapters(dbChapters)
+        }
+
+        // Insert About
+        documentRepository.insert(aboutDoc)
     }
 
     fun selectDocument(document: Document) {
@@ -212,7 +281,8 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
                 }
             }
 
-            ttsEngine.loadDocument(parsedSentences, updatedDoc.title, savedSentenceIdx)
+            ttsEngine.loadDocument(updatedDoc.id, parsedSentences, updatedDoc.title, savedSentenceIdx)
+            ttsEngine.setModelTier(updatedDoc.selectedModelTier)
             ttsEngine.setSpeed(updatedDoc.playbackSpeed)
             _isPlayerExpanded.value = true
         }
@@ -272,12 +342,48 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
             ttsEngine.pausePlayback()
             saveCurrentPlaybackPosition()
         } else {
+            // Restart from beginning if we completed the book
+            val currentIdx = currentSentenceIndex.value
+            val totalSentences = activeSentences.value.size
+            if (totalSentences > 0 && currentIdx >= totalSentences - 1) {
+                seekToSentence(0)
+            }
             ttsEngine.startPlayback()
+        }
+    }
+
+    fun seekToFraction(fraction: Float) {
+        val sentences = _activeSentences.value
+        if (sentences.isNotEmpty()) {
+            val totalChars = sentences.last().end
+            val targetCharIndex = (fraction * totalChars).toInt()
+            var bestSentenceIdx = 0
+            var minDiff = Int.MAX_VALUE
+            for ((idx, sent) in sentences.withIndex()) {
+                if (targetCharIndex in sent.start..sent.end) {
+                    bestSentenceIdx = idx
+                    break
+                }
+                val diff = Math.abs(sent.start - targetCharIndex)
+                if (diff < minDiff) {
+                    minDiff = diff
+                    bestSentenceIdx = idx
+                }
+            }
+            seekToSentence(bestSentenceIdx)
         }
     }
 
     fun seekToSentence(index: Int) {
         ttsEngine.seekToSentence(index)
+        val doc = _activeDocument.value ?: return
+        val sentencesList = _activeSentences.value
+        if (sentencesList.isNotEmpty() && index in sentencesList.indices) {
+            val currentSentence = sentencesList[index]
+            viewModelScope.launch {
+                documentRepository.updatePlaybackPosition(doc.id, currentSentence.start)
+            }
+        }
     }
 
     fun skipForward() {
@@ -309,6 +415,18 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
                 _activeDocument.value = doc.copy(selectedModelTier = tier)
             }
         }
+    }
+
+    fun setSelectedVoiceId(id: String) {
+        ttsEngine.setSelectedVoiceId(id)
+        val sharedPrefs = getApplication<Application>().getSharedPreferences("readout_prefs", android.content.Context.MODE_PRIVATE)
+        sharedPrefs.edit().putString("selected_voice_id", id).apply()
+    }
+
+    fun setTranslationTargetLang(langCode: String) {
+        ttsEngine.setTranslationTargetLang(langCode)
+        val sharedPrefs = getApplication<Application>().getSharedPreferences("readout_prefs", android.content.Context.MODE_PRIVATE)
+        sharedPrefs.edit().putString("translation_target_lang", langCode).apply()
     }
 
     fun startSleepTimer(minutes: Int) {
@@ -476,13 +594,12 @@ With modern local-first DSP algorithms, digital time-stretching decouples speed 
                     // Strip scripts, headers, menus
                     doc.select("script, style, header, footer, nav, aside, noscript, iframe").remove()
                     
-                    // Filter down to body article chunks or just text
-                    val articleElements = doc.select("article, main, .post-content, .mw-parser-output, p")
-                    val rawTxt = if (articleElements.isNotEmpty()) {
-                        articleElements.map { it.text() }.filter { it.length > 50 }.joinToString("\n\n")
-                    } else ""
-                    
-                    val textToUse = if (rawTxt.isNotBlank()) rawTxt else doc.body().text()
+                    val mainContent = doc.select("article, main, .post-content, .mw-parser-output").firstOrNull()
+                    val textToUse = if (mainContent != null) {
+                        mainContent.select("p, h1, h2, h3, h4, h5, h6, li, blockquote").map { it.text().trim() }.filter { it.isNotEmpty() }.joinToString("\n\n")
+                    } else {
+                        doc.select("p, h1, h2, h3, h4, h5, h6, li, blockquote").map { it.text().trim() }.filter { it.isNotEmpty() }.joinToString("\n\n")
+                    }
 
                     if (textToUse.isNotBlank()) {
                         val chapters = ChapterExtractor.extractChaptersFromText(textToUse)

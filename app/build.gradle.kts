@@ -17,15 +17,15 @@ android {
     applicationId = "com.iefan.readout"
     minSdk = 24
     targetSdk = 36
-    versionCode = 15
-    versionName = "1.1.4"
+    versionCode = 29
+    versionName = "1.4.1"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
   lint {
-    abortOnError = false
-    checkReleaseBuilds = false
+    abortOnError = true
+    checkReleaseBuilds = true
   }
 
   val localProperties = Properties()
@@ -105,6 +105,7 @@ secrets {
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
 dependencies {
+  implementation("androidx.fragment:fragment-ktx:1.8.1")
   implementation(platform(libs.androidx.compose.bom))
   implementation(platform(libs.firebase.bom))
   // implementation(libs.accompanist.permissions)

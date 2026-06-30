@@ -23,7 +23,8 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.iefan.readout.tts.SpeechSentence
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.filter
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -31,19 +32,45 @@ fun KaraokeView(
     sentences: List<SpeechSentence>,
     activeSentenceIndex: Int,
     currentWordRange: Pair<Int, Int>?,
+    isPlaying: Boolean,
+    isTranslating: Boolean = false,
     onSentenceJump: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListState()
-    val coroutineScope = rememberCoroutineScope()
+    var autoFollowEnabled by remember { mutableStateOf(true) }
+    var isAutoScrolling by remember { mutableStateOf(false) }
 
-    // Smooth scroll to keep active sentence at the top of the view
-    LaunchedEffect(activeSentenceIndex) {
-        if (sentences.isNotEmpty() && activeSentenceIndex >= 0 && activeSentenceIndex < sentences.size) {
-            coroutineScope.launch {
-                // Position the active sentence at the top with a 60px breathing-room offset
-                listState.animateScrollToItem(index = activeSentenceIndex, scrollOffset = -60)
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            autoFollowEnabled = true
+        }
+    }
+
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }
+            .filter { it }
+            .collectLatest {
+                if (!isAutoScrolling) {
+                    autoFollowEnabled = false
+                }
             }
+    }
+
+    LaunchedEffect(activeSentenceIndex, autoFollowEnabled, sentences) {
+        if (!autoFollowEnabled || activeSentenceIndex !in sentences.indices) return@LaunchedEffect
+
+        val visibleItems = listState.layoutInfo.visibleItemsInfo
+        val firstVisible = visibleItems.firstOrNull()?.index ?: -1
+        val lastVisible = visibleItems.lastOrNull()?.index ?: -1
+        val comfortablyVisible = activeSentenceIndex in (firstVisible + 1)..(lastVisible - 1)
+        if (comfortablyVisible) return@LaunchedEffect
+
+        isAutoScrolling = true
+        try {
+            listState.animateScrollToItem(index = maxOf(activeSentenceIndex - 1, 0))
+        } finally {
+            isAutoScrolling = false
         }
     }
 
@@ -68,7 +95,7 @@ fun KaraokeView(
         } else {
             LazyColumn(
                 state = listState,
-                contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 20.dp, bottom = 160.dp), // extra bottom padding for the floating player capsule
+                contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 48.dp, bottom = 160.dp), // extra bottom padding for the floating player capsule
                 verticalArrangement = Arrangement.spacedBy(16.dp),
                 modifier = Modifier
                     .fillMaxSize()
@@ -77,51 +104,34 @@ fun KaraokeView(
                 itemsIndexed(sentences) { idx, sentence ->
                     val isActive = idx == activeSentenceIndex
                     
-                    val annotatedText = remember(sentence, isActive, currentWordRange) {
+                    val annotatedText = remember(sentence, isActive, currentWordRange, isTranslating) {
                         buildAnnotatedString {
-                            if (isActive && currentWordRange != null) {
-                                val wordStart = currentWordRange.first
+                            if (isActive && currentWordRange != null && !isTranslating) {
                                 val wordEnd = currentWordRange.second
+                                val readLength = (wordEnd - sentence.start).coerceIn(0, sentence.text.length)
 
-                                var lastIndex = sentence.start
+                                val readText = sentence.text.substring(0, readLength)
+                                val remainingText = sentence.text.substring(readLength)
 
-                                // Find valid segments in the sentence words
-                                for (word in sentence.words) {
-                                    // Word overlaps or fully matches the current active range
-                                    if (word.start >= lastIndex) {
-                                        // Append text between last word and this word
-                                        if (word.start > lastIndex) {
-                                            val spaceText = sentence.text.substring(
-                                                (lastIndex - sentence.start).coerceIn(0, sentence.text.length),
-                                                (word.start - sentence.start).coerceIn(0, sentence.text.length)
-                                            )
-                                            append(spaceText)
-                                        }
-
-                                        // Now render word with highlight if within spoken range
-                                        val isWordActivelySpoken = (word.start >= wordStart && word.end <= wordEnd) ||
-                                                                   (wordStart >= word.start && wordStart < word.end)
-                                        
-                                        if (isWordActivelySpoken) {
-                                            withStyle(
-                                                SpanStyle(
-                                                    background = Color(0xFF60A5FA), // Royal blue glowing spotlight
-                                                    color = Color.Black,
-                                                    fontWeight = FontWeight.Bold
-                                                )
-                                            ) {
-                                                append(word.text)
-                                            }
-                                        } else {
-                                            append(word.text)
-                                        }
-                                        lastIndex = word.end
-                                    }
+                                withStyle(
+                                    SpanStyle(
+                                        background = Color(0xFF2E43FA),
+                                        color = Color.White
+                                    )
+                                ) {
+                                    append(readText)
                                 }
-                                
-                                // Append any remaining sentence text
-                                if (lastIndex - sentence.start < sentence.text.length) {
-                                    append(sentence.text.substring(lastIndex - sentence.start))
+                                withStyle(
+                                    SpanStyle(
+                                        color = Color.White
+                                    )
+                                ) {
+                                    append(remainingText)
+                                }
+                            } else if (isActive && !isTranslating) {
+                                // Sentence is active but no word range yet. Show all text white.
+                                withStyle(SpanStyle(color = Color.White)) {
+                                    append(sentence.text)
                                 }
                             } else {
                                 append(sentence.text)
@@ -129,43 +139,19 @@ fun KaraokeView(
                         }
                     }
 
-                    // Soft container backing with subtle border (glowing container style from screenshot)
-                    val containerBg = if (isActive) {
-                        Color(0xFF0F1E36).copy(alpha = 0.55f) // Translucent deep navy/slate
-                    } else {
-                        Color.Transparent
-                    }
-
-                    val containerBorderStroke = if (isActive) {
-                        androidx.compose.foundation.BorderStroke(
-                            width = 1.dp,
-                            color = Color(0xFF2F66F6).copy(alpha = 0.4f) // Sleek blue border
-                        )
-                    } else {
-                        null
-                    }
-
+                    // Distraction-free modifier: no container background, no border, simple click/double-click action
                     val itemModifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(containerBg)
                         .combinedClickable(
-                            onClick = {
-                                // Quick visual cursor selection feedback
-                            },
+                            onClick = {},
                             onDoubleClick = {
+                                autoFollowEnabled = true
                                 onSentenceJump(idx)
                             }
                         )
 
-                    val finalModifier = if (containerBorderStroke != null) {
-                        itemModifier.border(containerBorderStroke, RoundedCornerShape(10.dp))
-                    } else {
-                        itemModifier
-                    }
-
                     Box(
-                        modifier = finalModifier.padding(horizontal = 14.dp, vertical = 12.dp)
+                        modifier = itemModifier.padding(vertical = 6.dp)
                     ) {
                         Row(
                             verticalAlignment = Alignment.Top,

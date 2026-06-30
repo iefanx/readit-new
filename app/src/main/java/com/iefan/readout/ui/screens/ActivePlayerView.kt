@@ -2,6 +2,13 @@ package com.iefan.readout.ui.screens
 
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -61,6 +68,8 @@ fun ActivePlayerView(
     onSpeedChanged: (Float) -> Unit,
     onSleepTimerChanged: (Int) -> Unit,
     onSeekToChapter: (Chapter) -> Unit,
+    isTranslating: Boolean,
+    onSeekToFraction: (Float) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val view = LocalView.current
@@ -84,6 +93,43 @@ fun ActivePlayerView(
         }
     }
 
+    // Dynamic estimated remaining time calculations
+    val wordsRemaining = remember(currentSentenceIndex, sentences) {
+        if (currentSentenceIndex in sentences.indices) {
+            sentences.subList(currentSentenceIndex, sentences.size).sumOf { sentence ->
+                sentence.text.split(Regex("\\s+")).filter { it.isNotBlank() }.size
+            }
+        } else {
+            0
+        }
+    }
+
+    val timeRemainingStr = remember(wordsRemaining, playbackSpeed) {
+        val totalSeconds = if (playbackSpeed > 0f) {
+            (wordsRemaining / (2.5f * playbackSpeed)).toInt()
+        } else {
+            0
+        }
+        if (totalSeconds <= 0) {
+            "0s left"
+        } else if (totalSeconds < 60) {
+            "${totalSeconds}s left"
+        } else {
+            val totalMinutes = totalSeconds / 60
+            if (totalMinutes < 60) {
+                "${totalMinutes}m left"
+            } else {
+                val hours = totalMinutes / 60
+                val mins = totalMinutes % 60
+                if (mins > 0) {
+                    "${hours}h ${mins}m left"
+                } else {
+                    "${hours}h left"
+                }
+            }
+        }
+    }
+
     if (showChapterDialog) {
         ChapterSelectionDialog(
             chapters = chapters,
@@ -95,28 +141,49 @@ fun ActivePlayerView(
 
     Scaffold(
         topBar = {
-            CenterAlignedTopAppBar(
-                windowInsets = WindowInsets(0, 0, 0, 0),
-                title = {
-                    Text(
-                        text = "Readout Player",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp,
-                        color = Color.White
-                    )
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack, modifier = Modifier.testTag("player_back_btn")) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.Black)
+                    .padding(bottom = 8.dp)
+            ) {
+                // Line 1: Nav Bar Row (Back button, title, and TOC/Chapters button)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp)
+                ) {
+                    IconButton(
+                        onClick = onBack,
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .testTag("player_back_btn")
+                    ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Return to Library",
                             tint = Color.White
                         )
                     }
-                },
-                actions = {
+
+                    Text(
+                        text = document.title,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .fillMaxWidth(0.68f),
+                        textAlign = TextAlign.Center
+                    )
+
                     if (chapters.isNotEmpty()) {
-                        IconButton(onClick = { showChapterDialog = true }) {
+                        IconButton(
+                            onClick = { showChapterDialog = true },
+                            modifier = Modifier.align(Alignment.CenterEnd)
+                        ) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.Toc,
                                 contentDescription = "Table of Contents",
@@ -124,11 +191,31 @@ fun ActivePlayerView(
                             )
                         }
                     }
-                },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                    containerColor = Color.Black
-                )
-            )
+                }
+
+                // Line 2: Wide progress bar with remaining duration
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    SeekableProgressBar(
+                        progress = progressFraction,
+                        onSeek = onSeekToFraction,
+                        modifier = Modifier.weight(1f)
+                    )
+
+                    Spacer(modifier = Modifier.width(12.dp))
+
+                    Text(
+                        text = timeRemainingStr,
+                        fontSize = 11.sp,
+                        color = Color.LightGray,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
         },
         modifier = modifier
     ) { innerPadding ->
@@ -143,7 +230,14 @@ fun ActivePlayerView(
                 sentences = sentences,
                 activeSentenceIndex = currentSentenceIndex,
                 currentWordRange = currentWordRange,
-                onSentenceJump = onSeekToSentence,
+                isPlaying = isPlaying,
+                isTranslating = isTranslating,
+                onSentenceJump = { idx ->
+                    onSeekToSentence(idx)
+                    if (!isPlaying) {
+                        onTogglePlayback()
+                    }
+                },
                 modifier = Modifier.fillMaxSize()
             )
 
@@ -203,15 +297,73 @@ fun ActivePlayerView(
                                 modifier = Modifier
                                     .width(330.dp)
                                     .height(72.dp)
-                                    .clip(RoundedCornerShape(36.dp))
-                                    .background(Color(0xFF141416))
-                                    .border(1.dp, Color(0xFF242426), RoundedCornerShape(36.dp))
                             )
                         }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SeekableProgressBar(
+    progress: Float,
+    onSeek: (Float) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val primaryColor = MaterialTheme.colorScheme.primary
+    val trackColor = Color.White.copy(alpha = 0.15f)
+
+    Canvas(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(16.dp)
+            .pointerInput(Unit) {
+                detectTapGestures { offset ->
+                    val fraction = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
+                    onSeek(fraction)
+                }
+            }
+            .pointerInput(Unit) {
+                detectDragGestures { change, _ ->
+                    val fraction = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                    onSeek(fraction)
+                }
+            }
+    ) {
+        val h = size.height
+        val centerY = h / 2
+        val strokeWidthVal = 4.dp.toPx()
+        val thumbRadius = 6.dp.toPx()
+
+        // Draw track
+        drawLine(
+            color = trackColor,
+            start = Offset(0f, centerY),
+            end = Offset(size.width, centerY),
+            strokeWidth = strokeWidthVal,
+            cap = StrokeCap.Round
+        )
+
+        // Draw progress
+        val progressX = progress * size.width
+        if (progressX > 0f) {
+            drawLine(
+                color = primaryColor,
+                start = Offset(0f, centerY),
+                end = Offset(progressX, centerY),
+                strokeWidth = strokeWidthVal,
+                cap = StrokeCap.Round
+            )
+        }
+
+        // Draw thumb circle
+        drawCircle(
+            color = primaryColor,
+            radius = thumbRadius,
+            center = Offset(progressX, centerY)
+        )
     }
 }
 
@@ -230,115 +382,111 @@ fun FloatingCapsulePlayer(
     modifier: Modifier = Modifier
 ) {
     Box(modifier = modifier) {
-        Row(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .clip(RoundedCornerShape(36.dp))
+                .background(Color(0xD9141416))
+                .border(1.dp, Color(0x99242426), RoundedCornerShape(36.dp))
         ) {
-            // Dynamic Sleep Timer Icon Selection (Glowing Active State or normal sleep clock)
-            Box(
+            Row(
                 modifier = Modifier
-                    .size(42.dp)
-                    .clip(RoundedCornerShape(21.dp))
-                    .background(if (sleepTimerMinutes > 0) MaterialTheme.colorScheme.primary else Color(0xFF1F1F22))
-                    .clickable { onSelectSleepTimer() },
-                contentAlignment = Alignment.Center
+                    .fillMaxSize()
+                    .padding(horizontal = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                if (sleepTimerMinutes > 0) {
-                    val mm = sleepTimerRemainingSeconds / 60
-                    val ss = sleepTimerRemainingSeconds % 60
-                    Text(
-                        text = String.format(java.util.Locale.US, "%02d:%02d", mm, ss),
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Black,
-                        color = Color.White
-                    )
-                } else {
+                // Dynamic Sleep Timer Icon Selection (Glowing Active State or normal sleep clock)
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(RoundedCornerShape(21.dp))
+                        .background(if (sleepTimerMinutes > 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.85f) else Color(0xCC1F1F22))
+                        .clickable { onSelectSleepTimer() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (sleepTimerMinutes > 0) {
+                        val mm = sleepTimerRemainingSeconds / 60
+                        val ss = sleepTimerRemainingSeconds % 60
+                        Text(
+                            text = String.format(java.util.Locale.US, "%02d:%02d", mm, ss),
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Color.White
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.AccessTime,
+                            contentDescription = "Sleep Timer",
+                            tint = Color.White.copy(alpha = 0.85f),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
+                // Rewind 10s Button
+                IconButton(
+                    onClick = onSkipBackward,
+                    modifier = Modifier.size(44.dp)
+                ) {
                     Icon(
-                        imageVector = Icons.Default.AccessTime,
-                        contentDescription = "Sleep Timer",
+                        imageVector = Icons.Default.FastRewind,
+                        contentDescription = "Rewind",
+                        tint = Color.White.copy(alpha = 0.85f),
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+
+                // Central Play/Pause Capsule
+                Box(
+                    modifier = Modifier
+                        .size(54.dp)
+                        .clip(RoundedCornerShape(27.dp))
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.85f))
+                        .clickable { onTogglePlayback() }
+                        .testTag("play_pause_toggle_btn"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = if (isPlaying) "Pause" else "Play",
                         tint = Color.White,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+
+                // Forward 10s Button
+                IconButton(
+                    onClick = onSkipForward,
+                    modifier = Modifier.size(44.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.FastForward,
+                        contentDescription = "Forward",
+                        tint = Color.White.copy(alpha = 0.85f),
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+
+                // Speed Trigger Button Shows context overlay
+                Box(
+                    modifier = Modifier
+                        .width(52.dp)
+                        .height(42.dp)
+                        .clip(RoundedCornerShape(21.dp))
+                        .background(Color(0xCC1F1F22))
+                        .clickable { onSelectSpeedOnly() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = String.format(java.util.Locale.US, "%.1fx", playbackSpeed),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White.copy(alpha = 0.85f)
                     )
                 }
             }
-
-            // Rewind 10s Button
-            IconButton(
-                onClick = onSkipBackward,
-                modifier = Modifier.size(44.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.FastRewind,
-                    contentDescription = "Rewind",
-                    tint = Color.White,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
-
-            // Central Play/Pause Capsule
-            Box(
-                modifier = Modifier
-                    .size(54.dp)
-                    .clip(RoundedCornerShape(27.dp))
-                    .background(MaterialTheme.colorScheme.primary)
-                    .clickable { onTogglePlayback() }
-                    .testTag("play_pause_toggle_btn"),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = if (isPlaying) "Pause" else "Play",
-                    tint = Color.White,
-                    modifier = Modifier.size(28.dp)
-                )
-            }
-
-            // Forward 10s Button
-            IconButton(
-                onClick = onSkipForward,
-                modifier = Modifier.size(44.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.FastForward,
-                    contentDescription = "Forward",
-                    tint = Color.White,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
-
-            // Speed Trigger Button Shows context overlay
-            Box(
-                modifier = Modifier
-                    .width(52.dp)
-                    .height(42.dp)
-                    .clip(RoundedCornerShape(21.dp))
-                    .background(Color(0xFF1F1F22))
-                    .clickable { onSelectSpeedOnly() },
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = String.format(java.util.Locale.US, "%.1fx", playbackSpeed),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
-            }
         }
-
-        LinearProgressIndicator(
-            progress = progressFraction,
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .padding(horizontal = 36.dp)
-                .padding(top = 0.dp)
-                .height(3.dp),
-            color = MaterialTheme.colorScheme.primary,
-            trackColor = Color.White.copy(alpha = 0.15f)
-        )
     }
 }
 

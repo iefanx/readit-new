@@ -22,15 +22,19 @@ object ChapterExtractor {
         var currentOffset = 0
         
         // Patterns to match headings:
-        // Pattern 1: Chapter 1: The Beginning, Chapter IV - Arriving
+        // Pattern 1: Chapter 1: The Beginning, Chapter IV - Arriving, Chapter One
         val chapterPattern = Pattern.compile(
-            """^(?i)chapter\s+(\d+|[ivxldm]+)(?:\s*[:.-]\s*(.*))?$"""
+            """^(?i)chapter\s+(\d+|[ivxldm]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)(?:\s*[:.-]\s*(.*))?$"""
         )
         // Pattern 2: 1. Introduction, 2.3 Methodology (Short heading)
         val numberedPattern = Pattern.compile(
             """^(\d+(?:\.\d+)*)\.?\s+([A-Z][A-Za-z0-9'\s,-]{2,60})$"""
         )
-        // Pattern 3: Prologue, Epilogue, Introduction, Conclusion, etc.
+        // Pattern 3: Roman numeral prefix (e.g., I. Introduction, IV. The End)
+        val romanPattern = Pattern.compile(
+            """^([ivxldm]+)\.?\s+([A-Z][A-Za-z0-9'\s,-]{2,60})$""", Pattern.CASE_INSENSITIVE
+        )
+        // Pattern 4: Prologue, Epilogue, Introduction, Conclusion, etc.
         val standardPattern = Pattern.compile(
             """^(?i)(prologue|epilogue|introduction|conclusion|preface|foreword|afterword|appendix(\s+\w+)?)$"""
         )
@@ -58,6 +62,16 @@ object ChapterExtractor {
                         val num = numMatcher.group(1)
                         val name = numMatcher.group(2)
                         titleText = "$num $name"
+                        matched = true
+                    }
+                }
+
+                if (!matched) {
+                    val romanMatcher = romanPattern.matcher(trimmedLine)
+                    if (romanMatcher.matches()) {
+                        val roman = romanMatcher.group(1)
+                        val name = romanMatcher.group(2)
+                        titleText = "$roman $name"
                         matched = true
                     }
                 }
@@ -111,8 +125,9 @@ object ChapterExtractor {
         // Pattern to match: [Chapter/Section Title] ...... [Page Number]
         // or [Chapter/Section Title] [Page Number]
         // Or Chapter 1: The Beginning [Page Number]
+        // Support 2 or more dots/spaces/dashes
         val indexLinePattern = Pattern.compile(
-            """^(.*?)(?:\.{3,}|-{3,}|_{3,}|\s{3,})(?:\bpage\b\s*)?(\d+)\s*$"""
+            """^(.*?)(?:\.{2,}|-{2,}|_{2,}|\s{2,})(?:\bpage\b\s*)?(\d+)\s*$"""
         )
         
         val parsedPageTargets = mutableListOf<Pair<String, Int>>()
@@ -167,27 +182,52 @@ object ChapterExtractor {
         val candidates = mutableListOf<ChapterCandidate>()
         try {
             java.util.zip.ZipFile(epubFile).use { zip ->
-                // Look for NCX file
+                val tocMap = mutableListOf<Pair<String, String>>() // Pair of (title, srcFileSuffix)
+
+                // 1. Try NCX outline (EPUB 2)
                 val ncxEntry = zip.entries().asSequence().find { it.name.endsWith(".ncx", ignoreCase = true) }
                 if (ncxEntry != null) {
                     val xml = zip.getInputStream(ncxEntry).use { it.bufferedReader(Charsets.UTF_8).readText() }
                     val doc = Jsoup.parse(xml, "", org.jsoup.parser.Parser.xmlParser())
                     val navPoints = doc.select("navPoint")
                     
-                    val tocMap = mutableListOf<Pair<String, String>>() // Pair of (title, srcFileSuffix)
                     for (np in navPoints) {
                         val title = np.selectFirst("navLabel > text")?.text() ?: ""
                         val src = np.selectFirst("content")?.attr("src") ?: ""
                         if (title.isNotEmpty() && src.isNotEmpty()) {
-                            // Strip fragment
                             val cleanSrc = src.substringBefore("#").substringAfterLast("/")
                             if (cleanSrc.isNotEmpty()) {
                                 tocMap.add(Pair(title, cleanSrc))
                             }
                         }
                     }
-                    
-                    // We also need to know the offset of each file in the extracted text!
+                } else {
+                    // 2. Try EPUB 3 Navigation HTML (nav.xhtml, toc.xhtml etc.)
+                    val navEntry = zip.entries().asSequence().find { entry ->
+                        val name = entry.name.lowercase()
+                        name.endsWith("nav.xhtml") || name.endsWith("nav.html") || 
+                        name.endsWith("toc.xhtml") || name.endsWith("toc.html") || 
+                        name.endsWith("navigation.xhtml") || name.endsWith("navigation.html")
+                    }
+                    if (navEntry != null) {
+                        val html = zip.getInputStream(navEntry).use { it.bufferedReader(Charsets.UTF_8).readText() }
+                        val doc = Jsoup.parse(html)
+                        val links = doc.select("a")
+                        for (link in links) {
+                            val title = link.text().trim()
+                            val src = link.attr("href")
+                            if (title.isNotEmpty() && src.isNotEmpty()) {
+                                val cleanSrc = src.substringBefore("#").substringAfterLast("/")
+                                if (cleanSrc.isNotEmpty()) {
+                                    tocMap.add(Pair(title, cleanSrc))
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // If we found any TOC items, map them to file offsets
+                if (tocMap.isNotEmpty()) {
                     val entries = zip.entries().toList()
                     val textEntries = entries.filter { entry ->
                         val name = entry.name.lowercase()
@@ -210,11 +250,10 @@ object ChapterExtractor {
                             for (b in blocks) {
                                 contentBuilder.append(b.text().trim()).append("\n\n")
                             }
-                            currentOffset += contentBuilder.toString().length + 2 // +2 for the double newlines separating files
+                            currentOffset += contentBuilder.toString().length + 2
                         }
                     }
                     
-                    // Match TOC entries to file offsets
                     for (item in tocMap) {
                         val title = item.first
                         val srcFile = item.second
@@ -229,13 +268,11 @@ object ChapterExtractor {
             e.printStackTrace()
         }
 
-        // Deduplicate and return
         val sortedCandidates = candidates.distinctBy { it.charOffset }.sortedBy { it.charOffset }
         if (sortedCandidates.isNotEmpty()) {
             return sortedCandidates
         }
 
-        // Fallback to text-based extraction
         return extractChaptersFromText(extractedText)
     }
 
