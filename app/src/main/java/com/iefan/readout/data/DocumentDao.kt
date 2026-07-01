@@ -81,6 +81,20 @@ interface DocumentDao {
         deleteDocument(document)
     }
 
+    // ── Bookmarks ───────────────────────────────────────────────────────────
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertBookmark(bookmark: Bookmark): Long
+
+    @Delete
+    suspend fun deleteBookmark(bookmark: Bookmark)
+
+    @Query("SELECT * FROM bookmarks WHERE documentId = :documentId ORDER BY createdAt ASC")
+    fun getBookmarksForDocumentFlow(documentId: Long): Flow<List<Bookmark>>
+
+    @Query("SELECT * FROM bookmarks ORDER BY createdAt DESC")
+    fun getAllBookmarksFlow(): Flow<List<Bookmark>>
+
     @Transaction
     suspend fun deleteCollectionWithRelations(collection: CollectionEntity) {
         deleteCrossRefsForCollection(collection.id)

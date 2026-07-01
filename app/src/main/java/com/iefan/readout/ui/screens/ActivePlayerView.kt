@@ -18,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -32,12 +33,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.iefan.readout.data.Document
 import com.iefan.readout.data.Chapter
+import com.iefan.readout.data.Bookmark
 import com.iefan.readout.tts.SpeechSentence
 import com.iefan.readout.ui.components.KaraokeView
 import com.iefan.readout.ui.components.SoundWaveVisualizer
 import com.iefan.readout.ui.components.styleOfCaption
+import com.iefan.readout.utils.rememberHapticTrigger
 import com.iefan.readout.ui.components.styleOfSubtitle
-import com.iefan.readout.ui.components.ChapterSelectionDialog
+import com.iefan.readout.ui.components.BookmarkActionSheet
+import com.iefan.readout.ui.components.TableOfContentsSheet
 import androidx.compose.material.icons.automirrored.filled.Toc
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 
@@ -60,6 +64,7 @@ fun ActivePlayerView(
     sleepTimerMinutes: Int,
     sleepTimerRemainingSeconds: Int,
     chapters: List<Chapter>,
+    bookmarks: List<Bookmark>,
     onBack: () -> Unit,
     onTogglePlayback: () -> Unit,
     onSkipForward: () -> Unit,
@@ -68,10 +73,14 @@ fun ActivePlayerView(
     onSpeedChanged: (Float) -> Unit,
     onSleepTimerChanged: (Int) -> Unit,
     onSeekToChapter: (Chapter) -> Unit,
+    onSeekToBookmark: (Bookmark) -> Unit,
+    onAddBookmark: (sentenceIndex: Int, charOffset: Int, label: String) -> Unit,
+    onRemoveBookmark: (Bookmark) -> Unit,
     isTranslating: Boolean,
     onSeekToFraction: (Float) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val hapticTrigger = rememberHapticTrigger()
     val view = LocalView.current
     DisposableEffect(isPlaying) {
         if (isPlaying) {
@@ -83,7 +92,11 @@ fun ActivePlayerView(
     }
 
     var activeOverlay by remember { mutableStateOf(ActiveOverlay.NONE) }
-    var showChapterDialog by remember { mutableStateOf(false) }
+    var showTocSheet by remember { mutableStateOf(false) }
+
+    // Long-press bookmark state
+    data class PendingBookmark(val sentenceIndex: Int, val charOffset: Int, val text: String)
+    var pendingBookmark by remember { mutableStateOf<PendingBookmark?>(null) }
 
     val currentCharacterOffset = remember(currentSentenceIndex, sentences) {
         if (currentSentenceIndex in sentences.indices) {
@@ -130,12 +143,29 @@ fun ActivePlayerView(
         }
     }
 
-    if (showChapterDialog) {
-        ChapterSelectionDialog(
+    // TableOfContentsSheet (chapters + bookmarks)
+    if (showTocSheet) {
+        TableOfContentsSheet(
             chapters = chapters,
+            bookmarks = bookmarks,
             currentCharOffset = currentCharacterOffset,
             onChapterSelected = onSeekToChapter,
-            onDismiss = { showChapterDialog = false }
+            onBookmarkSelected = onSeekToBookmark,
+            onBookmarkDeleted = onRemoveBookmark,
+            onDismiss = { showTocSheet = false }
+        )
+    }
+
+    // BookmarkActionSheet (long-press on a sentence)
+    pendingBookmark?.let { pending ->
+        BookmarkActionSheet(
+            sentenceText = pending.text,
+            sentenceIndex = pending.sentenceIndex,
+            charOffset = pending.charOffset,
+            onConfirm = { label ->
+                onAddBookmark(pending.sentenceIndex, pending.charOffset, label)
+            },
+            onDismiss = { pendingBookmark = null }
         )
     }
 
@@ -154,7 +184,10 @@ fun ActivePlayerView(
                         .height(56.dp)
                 ) {
                     IconButton(
-                        onClick = onBack,
+                        onClick = {
+                            hapticTrigger()
+                            onBack()
+                        },
                         modifier = Modifier
                             .align(Alignment.CenterStart)
                             .testTag("player_back_btn")
@@ -179,17 +212,20 @@ fun ActivePlayerView(
                         textAlign = TextAlign.Center
                     )
 
-                    if (chapters.isNotEmpty()) {
-                        IconButton(
-                            onClick = { showChapterDialog = true },
-                            modifier = Modifier.align(Alignment.CenterEnd)
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.Toc,
-                                contentDescription = "Table of Contents",
-                                tint = Color.White
-                            )
-                        }
+                    // TOC button — always visible (shows chapters tab if available,
+                    // otherwise defaults to bookmarks tab)
+                    IconButton(
+                        onClick = {
+                            hapticTrigger()
+                            showTocSheet = true
+                        },
+                        modifier = Modifier.align(Alignment.CenterEnd)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Toc,
+                            contentDescription = "Table of Contents",
+                            tint = Color.White
+                        )
                     }
                 }
 
@@ -237,6 +273,10 @@ fun ActivePlayerView(
                     if (!isPlaying) {
                         onTogglePlayback()
                     }
+                },
+                onLongPressBookmark = { idx, text ->
+                    val charOffset = if (idx in sentences.indices) sentences[idx].start else 0
+                    pendingBookmark = PendingBookmark(idx, charOffset, text)
                 },
                 modifier = Modifier.fillMaxSize()
             )
@@ -315,21 +355,51 @@ private fun SeekableProgressBar(
     val primaryColor = MaterialTheme.colorScheme.primary
     val trackColor = Color.White.copy(alpha = 0.15f)
 
+    var dragProgress by remember { mutableStateOf<Float?>(null) }
+    val currentActualProgress by rememberUpdatedState(progress)
+    val displayProgress = dragProgress ?: progress
+    val view = LocalView.current
+
     Canvas(
         modifier = modifier
             .fillMaxWidth()
-            .height(16.dp)
+            .height(48.dp)
             .pointerInput(Unit) {
-                detectTapGestures { offset ->
-                    val fraction = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
-                    onSeek(fraction)
-                }
-            }
-            .pointerInput(Unit) {
-                detectDragGestures { change, _ ->
-                    val fraction = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
-                    onSeek(fraction)
-                }
+                var isDragging = false
+                detectDragGestures(
+                    onDragStart = { startPosition ->
+                        val progressX = currentActualProgress * size.width
+                        // Check if touch is within 24.dp of the thumb circle
+                        val distance = Math.abs(startPosition.x - progressX)
+                        if (distance <= 24.dp.toPx()) {
+                            isDragging = true
+                            dragProgress = currentActualProgress
+                            view.parent?.requestDisallowInterceptTouchEvent(true)
+                        }
+                    },
+                    onDragEnd = {
+                        if (isDragging) {
+                            dragProgress?.let { onSeek(it) }
+                            dragProgress = null
+                            isDragging = false
+                        }
+                        view.parent?.requestDisallowInterceptTouchEvent(false)
+                    },
+                    onDragCancel = {
+                        if (isDragging) {
+                            dragProgress = null
+                            isDragging = false
+                        }
+                        view.parent?.requestDisallowInterceptTouchEvent(false)
+                    },
+                    onDrag = { change, _ ->
+                        if (isDragging) {
+                            change.consume()
+                            val fraction = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                            dragProgress = fraction
+                        }
+                    }
+                )
             }
     ) {
         val h = size.height
@@ -347,7 +417,7 @@ private fun SeekableProgressBar(
         )
 
         // Draw progress
-        val progressX = progress * size.width
+        val progressX = displayProgress * size.width
         if (progressX > 0f) {
             drawLine(
                 color = primaryColor,
@@ -381,6 +451,7 @@ fun FloatingCapsulePlayer(
     onSelectSpeedOnly: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val hapticTrigger = rememberHapticTrigger()
     Box(modifier = modifier) {
         Box(
             modifier = Modifier
@@ -426,7 +497,10 @@ fun FloatingCapsulePlayer(
 
                 // Rewind 10s Button
                 IconButton(
-                    onClick = onSkipBackward,
+                    onClick = {
+                        hapticTrigger()
+                        onSkipBackward()
+                    },
                     modifier = Modifier.size(44.dp)
                 ) {
                     Icon(
@@ -443,7 +517,10 @@ fun FloatingCapsulePlayer(
                         .size(54.dp)
                         .clip(RoundedCornerShape(27.dp))
                         .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.85f))
-                        .clickable { onTogglePlayback() }
+                        .clickable {
+                            hapticTrigger()
+                            onTogglePlayback()
+                        }
                         .testTag("play_pause_toggle_btn"),
                     contentAlignment = Alignment.Center
                 ) {
@@ -457,7 +534,10 @@ fun FloatingCapsulePlayer(
 
                 // Forward 10s Button
                 IconButton(
-                    onClick = onSkipForward,
+                    onClick = {
+                        hapticTrigger()
+                        onSkipForward()
+                    },
                     modifier = Modifier.size(44.dp)
                 ) {
                     Icon(
@@ -475,7 +555,10 @@ fun FloatingCapsulePlayer(
                         .height(42.dp)
                         .clip(RoundedCornerShape(21.dp))
                         .background(Color(0xCC1F1F22))
-                        .clickable { onSelectSpeedOnly() },
+                        .clickable {
+                            hapticTrigger()
+                            onSelectSpeedOnly()
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     Text(

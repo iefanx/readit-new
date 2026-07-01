@@ -9,6 +9,9 @@ import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import com.iefan.readout.ui.theme.OledPrimary
 import com.iefan.readout.data.*
 import com.iefan.readout.tts.ReadoutTtsEngine
 import com.iefan.readout.tts.DocumentParser
@@ -47,8 +50,10 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
     private val _isLibraryOpen = MutableStateFlow(false)
     val isLibraryOpen = _isLibraryOpen.asStateFlow()
 
+    private val _collectionOrder = MutableStateFlow<List<Long>>(emptyList())
     val allCollections: StateFlow<List<CollectionEntity>>
     val allCrossRefs: StateFlow<List<DocumentCollectionCrossRef>>
+    val allBookmarks: StateFlow<List<Bookmark>>
 
     // Currently playing/viewed document
     private val _activeDocument = MutableStateFlow<Document?>(null)
@@ -75,6 +80,12 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
     private val _activeChapters = MutableStateFlow<List<Chapter>>(emptyList())
     val activeChapters = _activeChapters.asStateFlow()
 
+    private val _activeBookmarks = MutableStateFlow<List<Bookmark>>(emptyList())
+    val activeBookmarks = _activeBookmarks.asStateFlow()
+
+    // Cancellable job that keeps activeBookmarks in sync with the current document
+    private var bookmarkCollectionJob: kotlinx.coroutines.Job? = null
+
     // State bindings straight from TTS Engine
     val isPlaying: StateFlow<Boolean>
     val currentSentenceIndex: StateFlow<Int>
@@ -86,6 +97,9 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
     val selectedVoiceId: StateFlow<String>
     val availableVoices: StateFlow<List<VoiceInfo>>
     val translationTargetLang: StateFlow<String>
+
+    private val _themeColor = MutableStateFlow<Color>(OledPrimary)
+    val themeColor = _themeColor.asStateFlow()
 
     // Hardware Benchmark flow
     private val _benchmarkProgress = MutableStateFlow<Float?>(null)
@@ -100,12 +114,19 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
         ttsEngine = ReadoutTtsEngine(application)
 
         val sharedPrefs = application.getSharedPreferences("readout_prefs", android.content.Context.MODE_PRIVATE)
+        val savedColorInt = sharedPrefs.getInt("theme_color", OledPrimary.toArgb())
+        _themeColor.value = Color(savedColorInt)
+
         val savedTier = sharedPrefs.getString("selected_voice_tier", "HIGH_FIDELITY") ?: "HIGH_FIDELITY"
         ttsEngine.setModelTier(savedTier)
         val savedVoiceId = sharedPrefs.getString("selected_voice_id", "default") ?: "default"
         ttsEngine.setSelectedVoiceId(savedVoiceId)
         val savedTranslation = sharedPrefs.getString("translation_target_lang", "none") ?: "none"
         ttsEngine.setTranslationTargetLang(savedTranslation)
+
+        val orderStr = sharedPrefs.getString("collection_order", "") ?: ""
+        val savedOrder = if (orderStr.isNotEmpty()) orderStr.split(",").mapNotNull { it.toLongOrNull() } else emptyList()
+        _collectionOrder.value = savedOrder
 
         allDocuments = documentRepository.allDocuments
             .stateIn(
@@ -115,6 +136,14 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
             )
 
         allCollections = documentRepository.allCollections
+            .combine(_collectionOrder) { collections, order ->
+                if (order.isEmpty()) {
+                    collections.sortedByDescending { it.addedDate }
+                } else {
+                    val orderMap = order.withIndex().associate { it.value to it.index }
+                    collections.sortedBy { orderMap[it.id] ?: Int.MAX_VALUE }
+                }
+            }
             .stateIn(
                 scope = viewModelScope,
                 started = SharingStarted.WhileSubscribed(5000),
@@ -122,6 +151,13 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
             )
 
         allCrossRefs = documentRepository.allCrossRefs
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5000),
+                initialValue = emptyList()
+            )
+
+        allBookmarks = documentRepository.getAllBookmarksFlow()
             .stateIn(
                 scope = viewModelScope,
                 started = SharingStarted.WhileSubscribed(5000),
@@ -158,10 +194,10 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
             }
         }
 
-        // Trigger preloads if we haven't preloaded v3 samples before
+        // Trigger preloads if we haven't preloaded v4 samples before
         viewModelScope.launch {
             allDocuments.collect { list ->
-                val hasPreloaded = sharedPrefs.getBoolean("has_preloaded_samples_v3", false)
+                val hasPreloaded = sharedPrefs.getBoolean("has_preloaded_samples_v4", false)
                 if (!hasPreloaded) {
                     // Delete old default sample books to clean up the library list
                     for (doc in list) {
@@ -173,7 +209,7 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
                         }
                     }
                     preloadSampleBooks()
-                    sharedPrefs.edit().putBoolean("has_preloaded_samples_v3", true).apply()
+                    sharedPrefs.edit().putBoolean("has_preloaded_samples_v4", true).apply()
                 }
             }
         }
@@ -192,12 +228,14 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
                     }
                 }
                 val extracted = extractTextFromEpub(tempFile)
+                val coverPath = extractEpubCover(tempFile)
                 tempFile.delete()
                 
                 Document(
                     title = "The Odyssey",
                     content = extracted.content.ifBlank { "Error parsing The Odyssey." },
                     sourceUrl = "Homer",
+                    coverPath = coverPath,
                     selectedModelTier = "HIGH_FIDELITY",
                     playbackSpeed = 1.0f
                 ) to extracted.chapters
@@ -267,6 +305,13 @@ Here is what this app can do:
             val chapters = documentRepository.getChaptersForDocument(updatedDoc.id)
             _activeChapters.value = chapters
 
+            // Collect bookmarks reactively — cancel any previous document's stream first
+            bookmarkCollectionJob?.cancel()
+            bookmarkCollectionJob = viewModelScope.launch {
+                documentRepository.getBookmarksForDocumentFlow(updatedDoc.id)
+                    .collect { bookmarks -> _activeBookmarks.value = bookmarks }
+            }
+
             val parsedSentences = withContext(Dispatchers.Default) {
                 DocumentParser.parse(updatedDoc.content)
             }
@@ -285,6 +330,70 @@ Here is what this app can do:
             ttsEngine.setModelTier(updatedDoc.selectedModelTier)
             ttsEngine.setSpeed(updatedDoc.playbackSpeed)
             _isPlayerExpanded.value = true
+        }
+    }
+
+    fun seekToBookmark(bookmark: Bookmark) {
+        seekToSentence(bookmark.sentenceIndex)
+    }
+
+    fun selectBookmark(bookmark: Bookmark) {
+        viewModelScope.launch {
+            val doc = documentRepository.getDocumentById(bookmark.documentId)
+            if (doc != null) {
+                if (_activeDocument.value?.id == doc.id) {
+                    seekToBookmark(bookmark)
+                    _isPlayerExpanded.value = true
+                    return@launch
+                }
+
+                ttsEngine.stop()
+                val updatedDoc = doc.copy(lastReadTime = System.currentTimeMillis())
+                _activeDocument.value = updatedDoc
+                documentRepository.update(updatedDoc)
+
+                val chapters = documentRepository.getChaptersForDocument(updatedDoc.id)
+                _activeChapters.value = chapters
+
+                bookmarkCollectionJob?.cancel()
+                bookmarkCollectionJob = viewModelScope.launch {
+                    documentRepository.getBookmarksForDocumentFlow(updatedDoc.id)
+                        .collect { bookmarks -> _activeBookmarks.value = bookmarks }
+                }
+
+                val parsedSentences = withContext(Dispatchers.Default) {
+                    DocumentParser.parse(updatedDoc.content)
+                }
+                _activeSentences.value = parsedSentences
+
+                val targetIndex = bookmark.sentenceIndex.coerceIn(0, parsedSentences.size - 1)
+                ttsEngine.loadDocument(updatedDoc.id, parsedSentences, updatedDoc.title, targetIndex)
+                ttsEngine.setModelTier(updatedDoc.selectedModelTier)
+                ttsEngine.setSpeed(updatedDoc.playbackSpeed)
+                _isPlayerExpanded.value = true
+            }
+        }
+    }
+
+    fun addBookmark(sentenceIndex: Int, charOffset: Int, label: String) {
+        val doc = _activeDocument.value ?: return
+        viewModelScope.launch {
+            documentRepository.insertBookmark(
+                Bookmark(
+                    documentId = doc.id,
+                    sentenceIndex = sentenceIndex,
+                    charOffset = charOffset,
+                    label = label
+                )
+            )
+            // activeBookmarks updates automatically via the reactive Flow collection job
+        }
+    }
+
+    fun removeBookmark(bookmark: Bookmark) {
+        viewModelScope.launch {
+            documentRepository.deleteBookmark(bookmark)
+            // activeBookmarks updates automatically via the reactive Flow collection job
         }
     }
 
@@ -429,11 +538,17 @@ Here is what this app can do:
         sharedPrefs.edit().putString("translation_target_lang", langCode).apply()
     }
 
+    fun setThemeColor(color: Color) {
+        _themeColor.value = color
+        val sharedPrefs = getApplication<Application>().getSharedPreferences("readout_prefs", android.content.Context.MODE_PRIVATE)
+        sharedPrefs.edit().putInt("theme_color", color.toArgb()).apply()
+    }
+
     fun startSleepTimer(minutes: Int) {
         ttsEngine.startSleepTimer(minutes)
     }
 
-    fun addNewBook(title: String, content: String, sourceUrl: String?, coverPath: String? = null, chapters: List<ChapterCandidate> = emptyList()) {
+    fun addNewBook(title: String, content: String, sourceUrl: String?, coverPath: String? = null, chapters: List<ChapterCandidate> = emptyList(), autoSelect: Boolean = true) {
         viewModelScope.launch {
             val doc = Document(
                 title = title.ifBlank { "Untitled Document" },
@@ -455,7 +570,9 @@ Here is what this app can do:
                 documentRepository.insertChapters(dbChapters)
             }
             
-            selectDocument(createdDoc)
+            if (autoSelect) {
+                selectDocument(createdDoc)
+            }
         }
     }
 
@@ -504,6 +621,14 @@ Here is what this app can do:
     fun renameCollection(collection: CollectionEntity, newName: String) {
         viewModelScope.launch {
             documentRepository.renameCollection(collection.id, newName)
+        }
+    }
+
+    fun reorderCollections(collectionIds: List<Long>) {
+        viewModelScope.launch {
+            val sharedPrefs = getApplication<Application>().getSharedPreferences("readout_prefs", android.content.Context.MODE_PRIVATE)
+            sharedPrefs.edit().putString("collection_order", collectionIds.joinToString(",")).apply()
+            _collectionOrder.value = collectionIds
         }
     }
 
@@ -617,7 +742,7 @@ Here is what this app can do:
         }
     }
 
-    fun importDocumentFromUri(uri: android.net.Uri, customTitle: String?) {
+    fun importDocumentFromUri(uri: android.net.Uri, customTitle: String?, autoSelect: Boolean = true) {
         viewModelScope.launch {
             _isImporting.value = true
             try {
@@ -641,9 +766,10 @@ Here is what this app can do:
                             }
                         }
 
-                        val titleToUse = if (!customTitle.isNullOrBlank()) customTitle else {
+                        val rawTitle = if (!customTitle.isNullOrBlank()) customTitle else {
                             fileName.substringBeforeLast(".")
                         }
+                        val titleToUse = cleanBookTitle(rawTitle)
 
                         var isPdf = fileName.endsWith(".pdf", ignoreCase = true) || 
                                     (contentResolver.getType(uri) ?: "").contains("pdf", ignoreCase = true)
@@ -685,6 +811,7 @@ Here is what this app can do:
                             extracted = extractTextFromDocx(tempFile)
                         } else if (isEpub) {
                             extracted = extractTextFromEpub(tempFile)
+                            coverPath = extractEpubCover(tempFile)
                         } else if (isHtml) {
                             extracted = extractTextFromHtml(tempFile)
                         } else {
@@ -693,7 +820,7 @@ Here is what this app can do:
 
                         if (extracted.content.isNotBlank()) {
                             withContext(Dispatchers.Main) {
-                                addNewBook(titleToUse, extracted.content, fileName, coverPath, extracted.chapters)
+                                addNewBook(titleToUse, extracted.content, fileName, coverPath, extracted.chapters, autoSelect)
                             }
                         }
                     } catch (e: Exception) {
@@ -851,6 +978,79 @@ Here is what this app can do:
         }
     }
 
+    private suspend fun extractEpubCover(file: File): String? = withContext(Dispatchers.IO) {
+        try {
+            java.util.zip.ZipFile(file).use { zip ->
+                val entries = zip.entries().toList()
+
+                // Strategy 1: Parse OPF manifest
+                val opfEntry = entries.firstOrNull { it.name.lowercase().endsWith(".opf") }
+                if (opfEntry != null) {
+                    val opfContent = zip.getInputStream(opfEntry).bufferedReader(Charsets.UTF_8).readText()
+                    val opfDir = opfEntry.name.substringBeforeLast("/", "")
+
+                    val coverHref =
+                        Regex("""<item[^>]+id=["']cover[^"*]["'][^>]+href=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                            .find(opfContent)?.groupValues?.getOrNull(1)
+                        ?: Regex("""<item[^>]+properties=["'][^']*cover-image[^'*]["'][^>]+href=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                            .find(opfContent)?.groupValues?.getOrNull(1)
+                        ?: Regex("""<item[^>]+href=["']([^"']+)["'][^>]+properties=["'][^']*cover-image[^'*]["']""", RegexOption.IGNORE_CASE)
+                            .find(opfContent)?.groupValues?.getOrNull(1)
+
+                    if (coverHref != null) {
+                        val candidatePath = if (opfDir.isEmpty()) coverHref else "$opfDir/$coverHref"
+                        val coverEntry = zip.getEntry(candidatePath)
+                            ?: entries.firstOrNull { it.name.endsWith(coverHref, ignoreCase = true) }
+                        if (coverEntry != null) {
+                            val ext = coverHref.substringAfterLast(".").lowercase()
+                            if (ext in listOf("jpg", "jpeg", "png", "gif", "webp")) {
+                                val out = File(getApplication<Application>().filesDir, "cover_${System.currentTimeMillis()}.$ext")
+                                zip.getInputStream(coverEntry).use { inp -> FileOutputStream(out).use { inp.copyTo(it) } }
+                                return@withContext out.absolutePath
+                            }
+                        }
+                    }
+                }
+
+                // Strategy 2: Well-known cover filenames
+                val knownNames = listOf(
+                    "cover.jpg", "cover.jpeg", "cover.png",
+                    "images/cover.jpg", "images/cover.jpeg", "images/cover.png",
+                    "OEBPS/cover.jpg", "OEBPS/images/cover.jpg",
+                    "OEBPS/cover.jpeg", "OEBPS/images/cover.jpeg"
+                )
+                for (name in knownNames) {
+                    val entry = entries.firstOrNull {
+                        it.name.equals(name, ignoreCase = true) ||
+                        it.name.lowercase().endsWith("/$name")
+                    }
+                    if (entry != null) {
+                        val ext = entry.name.substringAfterLast(".").lowercase()
+                        val out = File(getApplication<Application>().filesDir, "cover_${System.currentTimeMillis()}.$ext")
+                        zip.getInputStream(entry).use { inp -> FileOutputStream(out).use { inp.copyTo(it) } }
+                        return@withContext out.absolutePath
+                    }
+                }
+
+                // Strategy 3: Any image with "cover" in the name
+                val byName = entries.firstOrNull { entry ->
+                    !entry.isDirectory &&
+                    entry.name.lowercase().contains("cover") &&
+                    entry.name.lowercase().let { it.endsWith(".jpg") || it.endsWith(".jpeg") || it.endsWith(".png") }
+                }
+                if (byName != null) {
+                    val ext = byName.name.substringAfterLast(".").lowercase()
+                    val out = File(getApplication<Application>().filesDir, "cover_${System.currentTimeMillis()}.$ext")
+                    zip.getInputStream(byName).use { inp -> FileOutputStream(out).use { inp.copyTo(it) } }
+                    return@withContext out.absolutePath
+                }
+            }
+            null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private suspend fun extractTextFromHtml(file: File): ExtractedDocument = withContext(Dispatchers.IO) {
         val content = try {
             val rawHtml = file.readText(Charsets.UTF_8)
@@ -967,6 +1167,15 @@ Here is what this app can do:
                 }
             }
         }
+    }
+
+    private fun cleanBookTitle(rawTitle: String): String {
+        val spaced = rawTitle.replace(Regex("[_\\-]+"), " ")
+        return spaced.split(" ")
+            .filter { it.isNotBlank() }
+            .joinToString(" ") { word ->
+                word.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() }
+            }
     }
 
     override fun onCleared() {

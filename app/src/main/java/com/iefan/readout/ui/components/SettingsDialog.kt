@@ -18,11 +18,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.drag
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import com.iefan.readout.tts.VoiceInfo
 import com.iefan.readout.tts.VoiceStatus
 
@@ -33,10 +43,12 @@ fun SettingsDialog(
     onSelectVoice: (String) -> Unit,
     translationTargetLang: String,
     onSelectTranslationLang: (String) -> Unit,
+    themeColor: Color,
+    onThemeColorChange: (Color) -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    var currentScreen by remember { mutableStateOf(0) } // 0 = Main Settings, 1 = Voice Selection, 2 = Translation
+    var currentScreen by remember { mutableStateOf(0) } // 0 = Main Settings, 1 = Voice Selection, 2 = Translation, 3 = Theme Color
 
     val translationLanguages = listOf(
         Pair("none", "Original Text"),
@@ -128,6 +140,26 @@ fun SettingsDialog(
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = "Translation",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                    3 -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(onClick = { currentScreen = 0 }) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "Back to settings"
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Theme Accent",
                                 style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurface
@@ -227,6 +259,60 @@ fun SettingsDialog(
                                 Icon(
                                     imageVector = Icons.Default.ChevronRight,
                                     contentDescription = "Go to translation settings",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            // Category: Theme Color
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f))
+                                    .border(
+                                        1.dp,
+                                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                        RoundedCornerShape(16.dp)
+                                    )
+                                    .clickable { currentScreen = 3 }
+                                    .padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Palette,
+                                    contentDescription = "Theme Color",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Spacer(modifier = Modifier.width(16.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Theme Accent Color",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(10.dp)
+                                                .clip(RoundedCornerShape(5.dp))
+                                                .background(themeColor)
+                                        )
+                                        Text(
+                                            text = String.format("#%06X", 0xFFFFFF and themeColor.toArgb()),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                Icon(
+                                    imageVector = Icons.Default.ChevronRight,
+                                    contentDescription = "Go to theme color settings",
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
@@ -523,6 +609,131 @@ fun SettingsDialog(
                             }
                         }
                     }
+
+                    3 -> {
+                        // Presets
+                        val presets = listOf(
+                            Pair(Color(0xFF305CDE), "Royal Blue (Default)"),
+                            Pair(Color(0xFF4CAF50), "Emerald Green"),
+                            Pair(Color(0xFFAB47BC), "Purple Accent"),
+                            Pair(Color(0xFFFF7043), "Sunset Orange"),
+                            Pair(Color(0xFFEF5350), "Crimson Red")
+                        )
+
+                        Text(
+                            text = "Preset Colors",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.align(Alignment.Start)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            presets.forEach { (presetColor, name) ->
+                                val isSelected = Math.abs(presetColor.red - themeColor.red) < 0.02f &&
+                                                 Math.abs(presetColor.green - themeColor.green) < 0.02f &&
+                                                 Math.abs(presetColor.blue - themeColor.blue) < 0.02f
+
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(RoundedCornerShape(18.dp))
+                                        .background(presetColor)
+                                        .border(
+                                            2.dp,
+                                            if (isSelected) Color.White else Color.Transparent,
+                                            RoundedCornerShape(18.dp)
+                                        )
+                                        .clickable { onThemeColorChange(presetColor) }
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(20.dp))
+
+                        // Custom color picker section
+                        Text(
+                            text = "Custom Color Picker",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.align(Alignment.Start)
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        val spectrumColors = remember {
+                            listOf(
+                                Color(0xFFEF5350), // Red
+                                Color(0xFFFF9800), // Orange
+                                Color(0xFFFFEB3B), // Yellow
+                                Color(0xFF4CAF50), // Green
+                                Color(0xFF009688), // Teal
+                                Color(0xFF2196F3), // Blue
+                                Color(0xFF3F51B5), // Royal Blue
+                                Color(0xFF9C27B0), // Purple
+                                Color(0xFFE91E63), // Pink
+                                Color(0xFFEF5350)  // Red
+                            )
+                        }
+
+                        // Gradient Bar
+                        Canvas(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(32.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .pointerInput(Unit) {
+                                    awaitPointerEventScope {
+                                        while (true) {
+                                            val down = awaitFirstDown()
+                                            val initialFraction = (down.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                                            onThemeColorChange(interpolateColorInSpectrum(spectrumColors, initialFraction))
+                                            
+                                            drag(down.id) { change ->
+                                                val dragFraction = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                                                onThemeColorChange(interpolateColorInSpectrum(spectrumColors, dragFraction))
+                                                change.consume()
+                                            }
+                                        }
+                                    }
+                                }
+                        ) {
+                            drawRect(
+                                brush = Brush.linearGradient(
+                                    colors = spectrumColors
+                                )
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // Live Color Preview Row
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(themeColor)
+                                    .border(1.5.dp, Color.White, RoundedCornerShape(12.dp))
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = String.format("#%06X", 0xFFFFFF and themeColor.toArgb()),
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -536,4 +747,21 @@ fun SettingsDialog(
             }
         }
     }
+}
+
+private fun interpolateColorInSpectrum(colors: List<Color>, fraction: Float): Color {
+    if (colors.isEmpty()) return Color.White
+    if (colors.size == 1) return colors[0]
+    val segmentCount = colors.size - 1
+    val scaledFraction = fraction * segmentCount
+    val index = scaledFraction.toInt().coerceIn(0, segmentCount - 1)
+    val localFraction = scaledFraction - index
+    val c1 = colors[index]
+    val c2 = colors[index + 1]
+    return Color(
+        red = c1.red + (c2.red - c1.red) * localFraction,
+        green = c1.green + (c2.green - c1.green) * localFraction,
+        blue = c1.blue + (c2.blue - c1.blue) * localFraction,
+        alpha = 1.0f
+    )
 }

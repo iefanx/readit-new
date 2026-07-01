@@ -52,9 +52,10 @@ fun MyApplicationTheme(
   darkTheme: Boolean = isSystemInDarkTheme(),
   // Custom theme option: set dynamicColor = false to preserve the High Density look
   dynamicColor: Boolean = false,
+  primaryColor: Color? = null,
   content: @Composable () -> Unit,
 ) {
-  val colorScheme =
+  val baseColorScheme =
     when {
       dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
         val context = LocalContext.current
@@ -64,6 +65,16 @@ fun MyApplicationTheme(
       darkTheme -> HighDensityDarkColorScheme
       else -> HighDensityLightColorScheme
     }
+
+  val colorScheme = if (primaryColor != null) {
+    baseColorScheme.copy(
+      primary = primaryColor,
+      primaryContainer = primaryColor.copy(alpha = 0.15f),
+      onPrimaryContainer = primaryColor
+    )
+  } else {
+    baseColorScheme
+  }
 
   MaterialTheme(colorScheme = colorScheme, typography = Typography, content = content)
 }

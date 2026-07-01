@@ -8,9 +8,11 @@ import androidx.compose.animation.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -21,6 +23,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -43,10 +46,13 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.Dp
 import com.iefan.readout.data.Document
 import com.iefan.readout.data.CollectionEntity
 import com.iefan.readout.data.DocumentCollectionCrossRef
 import com.iefan.readout.ui.components.styleOfCaption
+import com.iefan.readout.utils.CoverCache
+import com.iefan.readout.utils.rememberHapticTrigger
 import com.iefan.readout.ui.components.styleOfSubtitle
 
 enum class AddInputType {
@@ -75,7 +81,7 @@ fun MainLibraryView(
     onRenameCollection: (CollectionEntity, String) -> Unit,
     isImporting: Boolean = false,
     onUrlImport: (String, String?) -> Unit = { _, _ -> },
-    onUriImport: (Uri, String?) -> Unit = { _, _ -> },
+    onUriImport: (Uri, String?, Boolean) -> Unit = { _, _, _ -> },
     activeDocument: Document? = null,
     isPlaying: Boolean = false,
     progressFraction: Float = 0f,
@@ -84,8 +90,10 @@ fun MainLibraryView(
     onExpandPlayer: () -> Unit = {},
     onCloseMiniPlayer: () -> Unit = {},
     onSeekToFraction: (Float) -> Unit = {},
+    onReorderCollections: (List<Long>) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val hapticTrigger = rememberHapticTrigger()
     var showAddDialog by remember { mutableStateOf(false) }
     var activeInputType by remember { mutableStateOf(AddInputType.PASTE) }
     var collectionTargetDoc by remember { mutableStateOf<Document?>(null) }
@@ -94,29 +102,57 @@ fun MainLibraryView(
     var collectionToDelete by remember { mutableStateOf<CollectionEntity?>(null) }
     var documentToEdit by remember { mutableStateOf<Document?>(null) }
     var activeOptionsDoc by remember { mutableStateOf<Document?>(null) }
-    
+
+    val nonEvictCollections = remember(allCollections, allCrossRefs, allDocuments) {
+        allCollections.map { col ->
+            val docIds = allCrossRefs.filter { it.collectionId == col.id }.map { it.documentId }.toSet()
+            col to allDocuments.filter { it.id in docIds }
+        }.filter { it.second.isNotEmpty() }
+    }
+    var localCollections by remember(nonEvictCollections) {
+        mutableStateOf(nonEvictCollections)
+    }
+    var draggedIndex by remember { mutableStateOf<Int?>(null) }
+    var dragOffsetY by remember { mutableStateOf(0f) }
+
     // State management for raw picked uri
     var selectedFileUri by remember { mutableStateOf<Uri?>(null) }
     var selectedFileName by remember { mutableStateOf("") }
 
     val context = LocalContext.current
 
-    // Activity launcher for picker
+    // Activity launcher for picker supporting multi-upload
     val fileLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri ->
-        if (uri != null) {
-            selectedFileUri = uri
-            var displayName = "Imported File"
-            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                if (nameIndex != -1 && cursor.moveToFirst()) {
-                    displayName = cursor.getString(nameIndex)
+        contract = ActivityResultContracts.GetMultipleContents()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            if (uris.size == 1) {
+                val uri = uris[0]
+                selectedFileUri = uri
+                var displayName = "Imported File"
+                context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (nameIndex != -1 && cursor.moveToFirst()) {
+                        displayName = cursor.getString(nameIndex)
+                    }
+                }
+                selectedFileName = displayName
+                activeInputType = AddInputType.FILE
+                showAddDialog = true
+            } else {
+                // Multi-upload flow: import all selected files sequentially
+                uris.forEach { uri ->
+                    var displayName = "Imported File"
+                    context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                        val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                        if (nameIndex != -1 && cursor.moveToFirst()) {
+                            displayName = cursor.getString(nameIndex)
+                        }
+                    }
+                    val cleanTitle = displayName.substringBeforeLast(".")
+                    onUriImport(uri, cleanTitle, false)
                 }
             }
-            selectedFileName = displayName
-            activeInputType = AddInputType.FILE
-            showAddDialog = true
         }
     }
 
@@ -150,14 +186,20 @@ fun MainLibraryView(
                     }
                 },
                 actions = {
-                    IconButton(onClick = onOpenLibrary) {
+                    IconButton(onClick = {
+                        hapticTrigger()
+                        onOpenLibrary()
+                    }) {
                         Icon(
-                            imageVector = Icons.Default.MenuBook,
+                            imageVector = Icons.Default.LibraryBooks,
                             contentDescription = "Library",
                             tint = Color.White
                         )
                     }
-                    IconButton(onClick = onOpenSettings) {
+                    IconButton(onClick = {
+                        hapticTrigger()
+                        onOpenSettings()
+                    }) {
                         Icon(
                             imageVector = Icons.Default.Tune,
                             contentDescription = "Readout Settings",
@@ -198,6 +240,7 @@ fun MainLibraryView(
                             title = "File",
                             icon = Icons.Default.NoteAdd,
                             onClick = { 
+                                hapticTrigger()
                                 fileLauncher.launch("*/*")
                             },
                             modifier = Modifier.weight(1f)
@@ -207,6 +250,7 @@ fun MainLibraryView(
                             title = "Paste",
                             icon = Icons.Default.ContentPaste,
                             onClick = { 
+                                hapticTrigger()
                                 selectedFileUri = null
                                 activeInputType = AddInputType.PASTE
                                 showAddDialog = true 
@@ -218,6 +262,7 @@ fun MainLibraryView(
                             title = "Link",
                             icon = Icons.Default.Link,
                             onClick = { 
+                                hapticTrigger()
                                 selectedFileUri = null
                                 activeInputType = AddInputType.URL
                                 showAddDialog = true 
@@ -282,8 +327,14 @@ fun MainLibraryView(
                                 items(allDocuments, key = { it.id }) { doc ->
                                     DocumentCard(
                                         document = doc,
-                                        onSelect = { onSelectDocument(doc) },
-                                        onLongSelect = { activeOptionsDoc = doc }
+                                        onSelect = {
+                                            hapticTrigger()
+                                            onSelectDocument(doc)
+                                        },
+                                        onLongSelect = {
+                                            hapticTrigger()
+                                            activeOptionsDoc = doc
+                                        }
                                     )
                                 }
                             }
@@ -313,8 +364,14 @@ fun MainLibraryView(
                                 items(favoriteDocs, key = { it.id }) { doc ->
                                     DocumentCard(
                                         document = doc,
-                                        onSelect = { onSelectDocument(doc) },
-                                        onLongSelect = { activeOptionsDoc = doc }
+                                        onSelect = {
+                                            hapticTrigger()
+                                            onSelectDocument(doc)
+                                        },
+                                        onLongSelect = {
+                                            hapticTrigger()
+                                            activeOptionsDoc = doc
+                                        }
                                     )
                                 }
                             }
@@ -322,14 +379,70 @@ fun MainLibraryView(
                     }
                 }
 
-                val nonEvictCollections = allCollections.map { col ->
-                    val docIds = allCrossRefs.filter { it.collectionId == col.id }.map { it.documentId }.toSet()
-                    col to allDocuments.filter { it.id in docIds }
-                }.filter { it.second.isNotEmpty() }
+                if (localCollections.isNotEmpty()) {
+                    itemsIndexed(localCollections, key = { _, pair -> pair.first.id }) { index, (col, colDocs) ->
+                        val isDraggingThis = draggedIndex == index
+                        val translationY = if (isDraggingThis) dragOffsetY else 0f
 
-                if (nonEvictCollections.isNotEmpty()) {
-                    items(nonEvictCollections, key = { it.first.id }) { (col, colDocs) ->
-                        Column(modifier = Modifier.fillMaxWidth()) {
+                        val currentIndex = rememberUpdatedState(index)
+                        val currentCollections = rememberUpdatedState(localCollections)
+
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .graphicsLayer {
+                                    this.translationY = translationY
+                                    this.scaleX = if (isDraggingThis) 1.02f else 1.0f
+                                    this.scaleY = if (isDraggingThis) 1.02f else 1.0f
+                                    this.shadowElevation = if (isDraggingThis) 8.dp.toPx() else 0f
+                                }
+                                .background(if (isDraggingThis) Color(0xFF141416) else Color.Transparent)
+                                .pointerInput(col.id) {
+                                    detectDragGesturesAfterLongPress(
+                                        onDragStart = { offset ->
+                                            draggedIndex = currentIndex.value
+                                            dragOffsetY = 0f
+                                            hapticTrigger()
+                                        },
+                                        onDragEnd = {
+                                            onReorderCollections(currentCollections.value.map { it.first.id })
+                                            draggedIndex = null
+                                            dragOffsetY = 0f
+                                        },
+                                        onDragCancel = {
+                                            onReorderCollections(currentCollections.value.map { it.first.id })
+                                            draggedIndex = null
+                                            dragOffsetY = 0f
+                                        },
+                                        onDrag = { change, dragAmount ->
+                                            change.consume()
+                                            dragOffsetY += dragAmount.y
+
+                                            val currentDragIdx = draggedIndex
+                                            if (currentDragIdx != null) {
+                                                val threshold = 230.dp.toPx()
+                                                var targetIdx = currentDragIdx
+                                                if (dragOffsetY > threshold / 2 && currentDragIdx < currentCollections.value.lastIndex) {
+                                                    targetIdx = currentDragIdx + 1
+                                                    dragOffsetY -= threshold
+                                                } else if (dragOffsetY < -threshold / 2 && currentDragIdx > 0) {
+                                                    targetIdx = currentDragIdx - 1
+                                                    dragOffsetY += threshold
+                                                }
+
+                                                if (targetIdx != currentDragIdx) {
+                                                    val list = currentCollections.value.toMutableList()
+                                                    val item = list.removeAt(currentDragIdx)
+                                                    list.add(targetIdx, item)
+                                                    localCollections = list
+                                                    draggedIndex = targetIdx
+                                                    hapticTrigger()
+                                                }
+                                            }
+                                        }
+                                    )
+                                }
+                        ) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -344,7 +457,10 @@ fun MainLibraryView(
                                 Box {
                                     var showColMenu by remember { mutableStateOf(false) }
                                     IconButton(
-                                        onClick = { showColMenu = true },
+                                        onClick = {
+                                            hapticTrigger()
+                                            showColMenu = true
+                                        },
                                         modifier = Modifier.size(28.dp)
                                     ) {
                                         Icon(
@@ -369,6 +485,7 @@ fun MainLibraryView(
                                             },
                                             text = { Text("Rename", color = Color.White) },
                                             onClick = {
+                                                hapticTrigger()
                                                 renameTargetCollection = col
                                                 showColMenu = false
                                             }
@@ -383,6 +500,7 @@ fun MainLibraryView(
                                             },
                                             text = { Text("Delete", color = Color.Red) },
                                             onClick = {
+                                                hapticTrigger()
                                                 collectionToDelete = col
                                                 showColMenu = false
                                             }
@@ -400,8 +518,14 @@ fun MainLibraryView(
                                 items(colDocs, key = { it.id }) { doc ->
                                     DocumentCard(
                                         document = doc,
-                                        onSelect = { onSelectDocument(doc) },
-                                        onLongSelect = { activeOptionsDoc = doc }
+                                        onSelect = {
+                                            hapticTrigger()
+                                            onSelectDocument(doc)
+                                        },
+                                        onLongSelect = {
+                                            hapticTrigger()
+                                            activeOptionsDoc = doc
+                                        }
                                     )
                                 }
                             }
@@ -446,7 +570,7 @@ fun MainLibraryView(
                     showAddDialog = false
                 },
                 onUriImport = { uri, title ->
-                    onUriImport(uri, title)
+                    onUriImport(uri, title, true)
                     showAddDialog = false
                 }
             )
@@ -686,18 +810,28 @@ fun ActionCard(
 fun DocumentCard(
     document: Document,
     onSelect: () -> Unit,
-    onLongSelect: () -> Unit
+    onLongSelect: () -> Unit,
+    cardWidth: Dp = 135.dp,
+    cardHeight: Dp = 175.dp
 ) {
     val isPastedText = document.sourceUrl.isNullOrEmpty() || document.title.lowercase().contains("paste")
     val isLink = document.sourceUrl?.startsWith("http", ignoreCase = true) == true ||
                  document.sourceUrl?.startsWith("www.", ignoreCase = true) == true
-    
-    // Retrieve cover photo locally if present or render a clean typographic preview
+
+    val positionPercentage = if (document.content.isNotEmpty()) {
+        (document.playbackPosition.getOrZeroPercent() * 100 / document.content.length).coerceIn(0, 100)
+    } else 0
+
+    // Load cover bitmap from coverPath asynchronously, utilizing CoverCache
     val localCoverBitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(initialValue = null, key1 = document.coverPath) {
-        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            document.coverPath?.let { path ->
+        value = document.coverPath?.let { path ->
+            CoverCache.get(path) ?: kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 try {
-                    BitmapFactory.decodeFile(path)?.asImageBitmap()
+                    val bitmap = BitmapFactory.decodeFile(path)?.asImageBitmap()
+                    if (bitmap != null) {
+                        CoverCache.put(path, bitmap)
+                    }
+                    bitmap
                 } catch (e: Exception) {
                     null
                 }
@@ -723,14 +857,14 @@ fun DocumentCard(
 
     Column(
         modifier = Modifier
-            .width(135.dp)
+            .width(cardWidth)
             .padding(bottom = 8.dp)
     ) {
         // Document Cover Container
         Box(
             modifier = Modifier
-                .width(135.dp)
-                .height(175.dp)
+                .width(cardWidth)
+                .height(cardHeight)
                 .clip(RoundedCornerShape(14.dp))
                 .combinedClickable(
                     onClick = onSelect,
@@ -759,7 +893,20 @@ fun DocumentCard(
                         modifier = Modifier.fillMaxSize(),
                         verticalArrangement = Arrangement.SpaceBetween
                     ) {
-                        // Top row: Document type icon
+                        // Top: Elegant typeset title with top padding
+                        Text(
+                            text = document.title,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Serif,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color.White.copy(alpha = 0.95f),
+                            lineHeight = 16.sp,
+                            maxLines = 4,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+
+                        // Bottom Left: Document type icon
                         val iconVector = when {
                             isPastedText -> Icons.Default.ContentPaste
                             isLink -> Icons.Default.Link
@@ -771,39 +918,6 @@ fun DocumentCard(
                             tint = Color.White.copy(alpha = 0.5f),
                             modifier = Modifier.size(18.dp)
                         )
-
-                        // Middle: Elegant typeset title
-                        Text(
-                            text = document.title,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Serif,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color.White.copy(alpha = 0.95f),
-                            lineHeight = 16.sp,
-                            maxLines = 4,
-                            overflow = TextOverflow.Ellipsis
-                        )
-
-                        // Bottom: Tag badge
-                        val tagLabel = when {
-                            isPastedText -> "PASTE"
-                            isLink -> "LINK"
-                            else -> "FILE"
-                        }
-                        Box(
-                            modifier = Modifier
-                                .background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(6.dp))
-                                .border(0.5.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(6.dp))
-                                .padding(horizontal = 6.dp, vertical = 3.dp)
-                        ) {
-                            Text(
-                                text = tagLabel,
-                                color = Color.White.copy(alpha = 0.7f),
-                                fontSize = 8.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 0.5.sp
-                            )
-                        }
                     }
                 }
             }
@@ -841,19 +955,6 @@ fun DocumentCard(
             overflow = TextOverflow.Ellipsis,
             lineHeight = 16.sp
         )
-
-        Spacer(modifier = Modifier.height(2.dp))
-
-        val positionPercentage = if (document.content.isNotEmpty()) {
-            (document.playbackPosition.getOrZeroPercent() * 100 / document.content.length).coerceIn(0, 100)
-        } else 0
-        
-        Text(
-            text = "Progress: $positionPercentage%",
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)
-        )
     }
 }
 
@@ -872,10 +973,16 @@ fun AddDocumentDialog(
     var url by remember { mutableStateOf("") }
     var currentTab by remember { mutableStateOf(initialType) }
 
-    // Set initial title when a file is picked
+    // Set initial title when a file is picked (replacing underscores/hyphens with spaces and capitalizing)
     LaunchedEffect(selectedUri, selectedFileName) {
         if (selectedUri != null && currentTab == AddInputType.FILE) {
-            title = selectedFileName.substringBeforeLast(".")
+            val cleanName = selectedFileName.substringBeforeLast(".")
+            val spaced = cleanName.replace(Regex("[_\\-]+"), " ")
+            title = spaced.split(" ")
+                .filter { it.isNotBlank() }
+                .joinToString(" ") { word ->
+                    word.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() }
+                }
         }
     }
 
@@ -1233,6 +1340,7 @@ fun MiniPlayer(
     onClose: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val hapticTrigger = rememberHapticTrigger()
     Box(modifier = modifier) {
         Box(
             modifier = Modifier
@@ -1240,7 +1348,10 @@ fun MiniPlayer(
                 .clip(RoundedCornerShape(36.dp))
                 .background(Color(0xD9141416))
                 .border(1.dp, Color(0x99242426), RoundedCornerShape(36.dp))
-                .clickable { onExpand() }
+                .clickable {
+                    hapticTrigger()
+                    onExpand()
+                }
         ) {
             Row(
                 modifier = Modifier
@@ -1249,10 +1360,14 @@ fun MiniPlayer(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 val localCoverBitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(initialValue = null, key1 = document.coverPath) {
-                    value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        document.coverPath?.let { path ->
+                    value = document.coverPath?.let { path ->
+                        CoverCache.get(path) ?: kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                             try {
-                                BitmapFactory.decodeFile(path)?.asImageBitmap()
+                                val bitmap = BitmapFactory.decodeFile(path)?.asImageBitmap()
+                                if (bitmap != null) {
+                                    CoverCache.put(path, bitmap)
+                                }
+                                bitmap
                             } catch (e: Exception) {
                                 null
                             }
@@ -1260,11 +1375,22 @@ fun MiniPlayer(
                     }
                 }
                 
+                // Gradient palettes matching DocumentCard for visual consistency
+                val miniGradients = remember {
+                    listOf(
+                        listOf(Color(0xFF1E3A8A), Color(0xFF0F172A)),
+                        listOf(Color(0xFF0F1E36), Color(0xFF1E293B)),
+                        listOf(Color(0xFF1E1B4B), Color(0xFF312E81)),
+                        listOf(Color(0xFF0F2027), Color(0xFF2C5364)),
+                        listOf(Color(0xFF022C22), Color(0xFF064E3B))
+                    )
+                }
+                val miniGradient = miniGradients[Math.abs(document.title.hashCode()) % miniGradients.size]
+
                 Box(
                     modifier = Modifier
                         .size(42.dp)
-                        .clip(RoundedCornerShape(21.dp))
-                        .background(MaterialTheme.colorScheme.primaryContainer),
+                        .clip(RoundedCornerShape(21.dp)),
                     contentAlignment = Alignment.Center
                 ) {
                     val coverBitmap = localCoverBitmap
@@ -1276,11 +1402,10 @@ fun MiniPlayer(
                             modifier = Modifier.fillMaxSize()
                         )
                     } else {
-                        Icon(
-                            imageVector = Icons.Default.MenuBook,
-                            contentDescription = "Book Icon",
-                            tint = Color.White.copy(alpha = 0.8f),
-                            modifier = Modifier.size(20.dp)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Brush.verticalGradient(miniGradient))
                         )
                     }
                 }
@@ -1344,7 +1469,10 @@ fun MiniPlayer(
                         .size(42.dp)
                         .clip(RoundedCornerShape(21.dp))
                         .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.85f))
-                        .clickable { onTogglePlayback() }
+                        .clickable {
+                            hapticTrigger()
+                            onTogglePlayback()
+                        }
                         .testTag("mini_play_pause_btn"),
                     contentAlignment = Alignment.Center
                 ) {
@@ -1359,7 +1487,10 @@ fun MiniPlayer(
                 Spacer(modifier = Modifier.width(4.dp))
 
                 IconButton(
-                    onClick = onClose,
+                    onClick = {
+                        hapticTrigger()
+                        onClose()
+                    },
                     modifier = Modifier.size(36.dp)
                 ) {
                     Icon(

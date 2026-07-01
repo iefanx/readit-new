@@ -21,6 +21,7 @@ import com.iefan.readout.ui.screens.*
 import com.iefan.readout.ui.theme.MyApplicationTheme
 import com.iefan.readout.viewmodel.ReadoutViewModel
 import com.iefan.readout.data.Chapter
+import com.iefan.readout.data.Bookmark
 import com.iefan.readout.utils.InAppReviewHelper
 
 class MainActivity : ComponentActivity() {
@@ -45,9 +46,10 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            MyApplicationTheme {
-                val viewModel: ReadoutViewModel = viewModel()
-                
+            val viewModel: ReadoutViewModel = viewModel()
+            val themeColor by viewModel.themeColor.collectAsStateWithLifecycle()
+
+            MyApplicationTheme(primaryColor = themeColor) {
                 // Collect reactive StateFlows from ViewModel
                 val allDocuments by viewModel.allDocuments.collectAsStateWithLifecycle()
                 val isLibraryOpen by viewModel.isLibraryOpen.collectAsStateWithLifecycle()
@@ -68,6 +70,8 @@ class MainActivity : ComponentActivity() {
                 val isImporting by viewModel.isImporting.collectAsStateWithLifecycle()
                 val isPlayerExpanded by viewModel.isPlayerExpanded.collectAsStateWithLifecycle()
                 val activeChapters by viewModel.activeChapters.collectAsStateWithLifecycle()
+                val activeBookmarks by viewModel.activeBookmarks.collectAsStateWithLifecycle()
+                val allBookmarks by viewModel.allBookmarks.collectAsStateWithLifecycle()
 
                 val progressFraction = remember(wordRange, sentences, currentIndex) {
                     val totalChars = if (sentences.isNotEmpty()) sentences.last().end else 0
@@ -130,6 +134,8 @@ class MainActivity : ComponentActivity() {
                                 allDocuments = allDocuments,
                                 allCollections = allCollections,
                                 allCrossRefs = allCrossRefs,
+                                allBookmarks = allBookmarks,
+                                onSelectBookmark = { bookmark -> viewModel.selectBookmark(bookmark) },
                                 onBack = { viewModel.setLibraryOpen(false) },
                                 onSelectDocument = { doc ->
                                     viewModel.selectDocument(doc)
@@ -166,10 +172,11 @@ class MainActivity : ComponentActivity() {
                                 onRenameCollection = { col, newName -> viewModel.renameCollection(col, newName) },
                                 isImporting = isImporting,
                                 onUrlImport = { url, customTitle -> viewModel.importDocumentFromUrl(url, customTitle) },
-                                onUriImport = { uri, customTitle -> viewModel.importDocumentFromUri(uri, customTitle) },
+                                onUriImport = { uri, customTitle, autoSelect -> viewModel.importDocumentFromUri(uri, customTitle, autoSelect) },
                                 onEditDocument = { docId, nextTitle, nextCoverUri, removeCover ->
                                     viewModel.updateBookDetails(docId, nextTitle, nextCoverUri, removeCover)
                                 },
+                                onReorderCollections = { ids -> viewModel.reorderCollections(ids) },
                                 
                                 // Mini Player bindings
                                 activeDocument = activeDocVal,
@@ -200,6 +207,7 @@ class MainActivity : ComponentActivity() {
                             sleepTimerMinutes = sleepTimerMinutes,
                             sleepTimerRemainingSeconds = remainingSeconds,
                             chapters = activeChapters,
+                            bookmarks = activeBookmarks,
                             onBack = { viewModel.minimizePlayer() },
                             onTogglePlayback = { viewModel.togglePlayback() },
                             onSkipForward = { viewModel.skipForward() },
@@ -208,6 +216,11 @@ class MainActivity : ComponentActivity() {
                             onSpeedChanged = { nextSpeed -> viewModel.setPlaybackSpeed(nextSpeed) },
                             onSleepTimerChanged = { m -> viewModel.startSleepTimer(m) },
                             onSeekToChapter = { chapter -> viewModel.seekToChapter(chapter) },
+                            onSeekToBookmark = { bookmark -> viewModel.seekToBookmark(bookmark) },
+                            onAddBookmark = { sentIdx, charOff, lbl ->
+                                viewModel.addBookmark(sentIdx, charOff, lbl)
+                            },
+                            onRemoveBookmark = { bookmark -> viewModel.removeBookmark(bookmark) },
                             isTranslating = translationTargetLang != "none",
                             onSeekToFraction = { fraction -> viewModel.seekToFraction(fraction) }
                         )
@@ -221,6 +234,8 @@ class MainActivity : ComponentActivity() {
                             onSelectVoice = { voiceId -> viewModel.setSelectedVoiceId(voiceId) },
                             translationTargetLang = translationTargetLang,
                             onSelectTranslationLang = { lang -> viewModel.setTranslationTargetLang(lang) },
+                            themeColor = themeColor,
+                            onThemeColorChange = { color -> viewModel.setThemeColor(color) },
                             onDismiss = { showSettings = false }
                         )
                     }

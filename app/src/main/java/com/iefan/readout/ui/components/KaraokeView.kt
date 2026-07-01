@@ -35,6 +35,7 @@ fun KaraokeView(
     isPlaying: Boolean,
     isTranslating: Boolean = false,
     onSentenceJump: (Int) -> Unit,
+    onLongPressBookmark: (sentenceIndex: Int, sentenceText: String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListState()
@@ -147,6 +148,9 @@ fun KaraokeView(
                             onDoubleClick = {
                                 autoFollowEnabled = true
                                 onSentenceJump(idx)
+                            },
+                            onLongClick = {
+                                onLongPressBookmark(idx, sentence.text)
                             }
                         )
 

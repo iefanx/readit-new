@@ -29,13 +29,16 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.Dp
 import com.iefan.readout.data.CollectionEntity
 import com.iefan.readout.data.Document
 import com.iefan.readout.data.DocumentCollectionCrossRef
+import com.iefan.readout.data.Bookmark
 import java.io.File
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.items
+import com.iefan.readout.utils.rememberHapticTrigger
 
 enum class SortOption(val displayName: String) {
     LAST_READ("Last Read"),
@@ -46,6 +49,7 @@ enum class SortOption(val displayName: String) {
 sealed class LibraryFilter {
     object All : LibraryFilter()
     object Favorites : LibraryFilter()
+    object Bookmarks : LibraryFilter()
     data class Collection(val collection: CollectionEntity) : LibraryFilter()
 }
 
@@ -55,6 +59,8 @@ fun LibraryView(
     allDocuments: List<Document>,
     allCollections: List<CollectionEntity>,
     allCrossRefs: List<DocumentCollectionCrossRef>,
+    allBookmarks: List<Bookmark> = emptyList(),
+    onSelectBookmark: (Bookmark) -> Unit = {},
     onBack: () -> Unit,
     onSelectDocument: (Document) -> Unit,
     onToggleFavorite: (Document) -> Unit,
@@ -66,10 +72,12 @@ fun LibraryView(
     onEditDocument: (Long, String, Uri?, Boolean) -> Unit = { _, _, _, _ -> },
     modifier: Modifier = Modifier
 ) {
+    val hapticTrigger = rememberHapticTrigger()
     var searchQuery by remember { mutableStateOf("") }
     var sortBy by remember { mutableStateOf(SortOption.LAST_READ) }
     var showSortMenu by remember { mutableStateOf(false) }
     var activeFilter by remember { mutableStateOf<LibraryFilter>(LibraryFilter.All) }
+    var isSearchActive by remember { mutableStateOf(false) }
 
     // Dialog state for collection assignment
     var collectionTargetDoc by remember { mutableStateOf<Document?>(null) }
@@ -86,6 +94,7 @@ fun LibraryView(
             when (activeFilter) {
                 is LibraryFilter.All -> true
                 is LibraryFilter.Favorites -> doc.isFavorite
+                is LibraryFilter.Bookmarks -> false // Handled separately in the UI list
                 is LibraryFilter.Collection -> {
                     val colId = (activeFilter as LibraryFilter.Collection).collection.id
                     allCrossRefs.any { it.collectionId == colId && it.documentId == doc.id }
@@ -97,6 +106,12 @@ fun LibraryView(
                 SortOption.TITLE -> d1.title.compareTo(d2.title, ignoreCase = true)
                 SortOption.DATE_ADDED -> d2.addedDate.compareTo(d1.addedDate)
             }
+        }
+    }
+
+    val filteredBookmarks = remember(allBookmarks, searchQuery) {
+        allBookmarks.filter {
+            it.label.contains(searchQuery, ignoreCase = true)
         }
     }
 
@@ -113,7 +128,10 @@ fun LibraryView(
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = {
+                        hapticTrigger()
+                        onBack()
+                    }) {
                         Icon(
                             imageVector = Icons.Default.ArrowBack,
                             contentDescription = "Back",
@@ -122,8 +140,22 @@ fun LibraryView(
                     }
                 },
                 actions = {
+                    IconButton(onClick = {
+                        hapticTrigger()
+                        isSearchActive = !isSearchActive
+                        if (!isSearchActive) searchQuery = ""
+                    }) {
+                        Icon(
+                            imageVector = Icons.Default.Search,
+                            contentDescription = "Toggle Search",
+                            tint = if (isSearchActive) MaterialTheme.colorScheme.primary else Color.White
+                        )
+                    }
                     Box {
-                        IconButton(onClick = { showSortMenu = true }) {
+                        IconButton(onClick = {
+                            hapticTrigger()
+                            showSortMenu = true
+                        }) {
                             Icon(
                                 imageVector = Icons.Default.Sort,
                                 contentDescription = "Sort Options",
@@ -145,6 +177,7 @@ fun LibraryView(
                                         )
                                     },
                                     onClick = {
+                                        hapticTrigger()
                                         sortBy = option
                                         showSortMenu = false
                                     }
@@ -165,36 +198,39 @@ fun LibraryView(
                 .padding(innerPadding)
                 .fillMaxSize()
                 .background(Color.Black)
-                .padding(horizontal = 24.dp)
+                .padding(horizontal = 12.dp)
         ) {
-            // Search Input Field
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                placeholder = { Text("Search by title...", color = Color.Gray, fontSize = 14.sp) },
-                singleLine = true,
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Default.Search,
-                        contentDescription = "Search",
-                        tint = Color.Gray
-                    )
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 12.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = Color(0xFF242426),
-                    focusedContainerColor = Color(0xFF141416),
-                    unfocusedContainerColor = Color(0xFF141416),
-                    focusedTextColor = Color.White,
-                    unfocusedTextColor = Color.White
-                ),
-                shape = RoundedCornerShape(16.dp)
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
+            // Search Input Field (Compact and Collapsible)
+            if (isSearchActive) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("Search...", color = Color.Gray, fontSize = 13.sp) },
+                    singleLine = true,
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Default.Search,
+                            contentDescription = "Search",
+                            tint = Color.Gray,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 6.dp)
+                        .height(48.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = Color(0xFF242426),
+                        focusedContainerColor = Color(0xFF141416),
+                        unfocusedContainerColor = Color(0xFF141416),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(12.dp)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+            }
 
             // Scrollable filter chips
             val hasFavorites = remember(allDocuments) { allDocuments.any { it.isFavorite } }
@@ -210,6 +246,14 @@ fun LibraryView(
                         text = "All",
                         selected = activeFilter is LibraryFilter.All,
                         onClick = { activeFilter = LibraryFilter.All }
+                    )
+                }
+
+                item {
+                    FilterChipButton(
+                        text = "Bookmarks",
+                        selected = activeFilter is LibraryFilter.Bookmarks,
+                        onClick = { activeFilter = LibraryFilter.Bookmarks }
                     )
                 }
 
@@ -234,43 +278,141 @@ fun LibraryView(
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            if (filteredAndSortedDocuments.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            imageVector = Icons.Default.MenuBook,
-                            contentDescription = "No books",
-                            tint = Color.DarkGray,
-                            modifier = Modifier.size(64.dp)
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = if (searchQuery.isNotEmpty()) "No match found" else "No books in Library",
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.Gray
-                        )
+            if (activeFilter is LibraryFilter.Bookmarks) {
+                if (filteredBookmarks.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = Icons.Default.BookmarkBorder,
+                                contentDescription = "No bookmarks",
+                                tint = Color.DarkGray,
+                                modifier = Modifier.size(64.dp)
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = if (searchQuery.isNotEmpty()) "No matching bookmarks" else "No bookmarks saved yet",
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.Gray
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        contentPadding = PaddingValues(bottom = 24.dp)
+                    ) {
+                        items(filteredBookmarks, key = { it.id }) { bookmark ->
+                            val docTitle = remember(allDocuments, bookmark.documentId) {
+                                allDocuments.firstOrNull { it.id == bookmark.documentId }?.title ?: "Unknown Document"
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0xFF141416))
+                                    .border(1.dp, Color(0xFF242426), RoundedCornerShape(12.dp))
+                                    .clickable {
+                                        hapticTrigger()
+                                        onSelectBookmark(bookmark)
+                                    }
+                                    .padding(14.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .width(4.dp)
+                                            .height(36.dp)
+                                            .clip(RoundedCornerShape(2.dp))
+                                            .background(MaterialTheme.colorScheme.primary)
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = docTitle,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = bookmark.label,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = Color.White,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Icon(
+                                        imageVector = Icons.Default.Bookmark,
+                                        contentDescription = "Bookmark",
+                                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(2),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(bottom = 24.dp)
-                ) {
-                    items(filteredAndSortedDocuments, key = { it.id }) { doc ->
-                        DocumentCard(
-                            document = doc,
-                            onSelect = { onSelectDocument(doc) },
-                            onLongSelect = { activeOptionsDoc = doc }
-                        )
+                if (filteredAndSortedDocuments.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = Icons.Default.MenuBook,
+                                contentDescription = "No books",
+                                tint = Color.DarkGray,
+                                modifier = Modifier.size(64.dp)
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = if (searchQuery.isNotEmpty()) "No match found" else "No books in Library",
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.Gray
+                            )
+                        }
+                    }
+                } else {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(3),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(bottom = 24.dp)
+                    ) {
+                        items(filteredAndSortedDocuments, key = { it.id }) { doc ->
+                            DocumentCard(
+                                document = doc,
+                                onSelect = {
+                                    hapticTrigger()
+                                    onSelectDocument(doc)
+                                },
+                                onLongSelect = {
+                                    hapticTrigger()
+                                    activeOptionsDoc = doc
+                                },
+                                cardWidth = 95.dp,
+                                cardHeight = 125.dp
+                            )
+                        }
                     }
                 }
             }
@@ -524,6 +666,7 @@ fun FilterChipButton(
     selected: Boolean,
     onClick: () -> Unit
 ) {
+    val hapticTrigger = rememberHapticTrigger()
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(20.dp))
@@ -533,7 +676,10 @@ fun FilterChipButton(
                 if (selected) Color.Transparent else Color(0xFF242426),
                 RoundedCornerShape(20.dp)
             )
-            .clickable { onClick() }
+            .clickable {
+                hapticTrigger()
+                onClick()
+            }
             .padding(horizontal = 16.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center
     ) {

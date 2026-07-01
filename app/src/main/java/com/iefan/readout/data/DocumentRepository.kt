@@ -48,4 +48,16 @@ class DocumentRepository(private val documentDao: DocumentDao) {
     suspend fun insertChapters(chapters: List<Chapter>) = documentDao.insertChapters(chapters)
 
     suspend fun deleteChaptersForDocument(documentId: Long) = documentDao.deleteChaptersForDocument(documentId)
+
+    // ── Bookmarks ────────────────────────────────────────────────────────────
+
+    suspend fun insertBookmark(bookmark: Bookmark): Long = documentDao.insertBookmark(bookmark)
+
+    suspend fun deleteBookmark(bookmark: Bookmark) = documentDao.deleteBookmark(bookmark)
+
+    fun getBookmarksForDocumentFlow(documentId: Long): Flow<List<Bookmark>> =
+        documentDao.getBookmarksForDocumentFlow(documentId)
+
+    fun getAllBookmarksFlow(): Flow<List<Bookmark>> =
+        documentDao.getAllBookmarksFlow()
 }
