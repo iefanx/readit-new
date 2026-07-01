@@ -818,22 +818,28 @@ fun DocumentCard(
     val isLink = document.sourceUrl?.startsWith("http", ignoreCase = true) == true ||
                  document.sourceUrl?.startsWith("www.", ignoreCase = true) == true
 
-    val positionPercentage = if (document.content.isNotEmpty()) {
-        (document.playbackPosition.getOrZeroPercent() * 100 / document.content.length).coerceIn(0, 100)
+    val positionPercentage = if (document.contentLength > 0) {
+        (document.playbackPosition.getOrZeroPercent() * 100 / document.contentLength).coerceIn(0, 100)
     } else 0
 
     // Load cover bitmap from coverPath asynchronously, utilizing CoverCache
-    val localCoverBitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(initialValue = null, key1 = document.coverPath) {
-        value = document.coverPath?.let { path ->
-            CoverCache.get(path) ?: kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                try {
-                    val bitmap = BitmapFactory.decodeFile(path)?.asImageBitmap()
-                    if (bitmap != null) {
-                        CoverCache.put(path, bitmap)
+    val cachedBitmap = remember(document.coverPath) {
+        document.coverPath?.let { CoverCache.get(it) }
+    }
+
+    val localCoverBitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(initialValue = cachedBitmap, key1 = document.coverPath) {
+        if (cachedBitmap == null) {
+            value = document.coverPath?.let { path ->
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    try {
+                        val bitmap = BitmapFactory.decodeFile(path)?.asImageBitmap()
+                        if (bitmap != null) {
+                            CoverCache.put(path, bitmap)
+                        }
+                        bitmap
+                    } catch (e: Exception) {
+                        null
                     }
-                    bitmap
-                } catch (e: Exception) {
-                    null
                 }
             }
         }
@@ -872,7 +878,7 @@ fun DocumentCard(
                 )
                 .testTag("document_card_${document.id}")
         ) {
-            val coverBitmap = localCoverBitmap
+            val coverBitmap = cachedBitmap ?: localCoverBitmap
             if (coverBitmap != null) {
                 // Real Extracted Vector/PDF Thumbnail Preview Cover
                 Image(
@@ -923,8 +929,8 @@ fun DocumentCard(
             }
 
             // Visual Progress Strip at the bottom of the cover
-            val percentage = if (document.content.isNotEmpty()) {
-                (document.playbackPosition.getOrZeroPercent().toFloat() / document.content.length.toFloat()).coerceIn(0f, 1f)
+            val percentage = if (document.contentLength > 0) {
+                (document.playbackPosition.getOrZeroPercent().toFloat() / document.contentLength.toFloat()).coerceIn(0f, 1f)
             } else 0f
 
             Box(
@@ -1359,17 +1365,23 @@ fun MiniPlayer(
                     .padding(start = 14.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                val localCoverBitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(initialValue = null, key1 = document.coverPath) {
-                    value = document.coverPath?.let { path ->
-                        CoverCache.get(path) ?: kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                            try {
-                                val bitmap = BitmapFactory.decodeFile(path)?.asImageBitmap()
-                                if (bitmap != null) {
-                                    CoverCache.put(path, bitmap)
+                val cachedBitmap = remember(document.coverPath) {
+                    document.coverPath?.let { CoverCache.get(it) }
+                }
+
+                val localCoverBitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(initialValue = cachedBitmap, key1 = document.coverPath) {
+                    if (cachedBitmap == null) {
+                        value = document.coverPath?.let { path ->
+                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                try {
+                                    val bitmap = BitmapFactory.decodeFile(path)?.asImageBitmap()
+                                    if (bitmap != null) {
+                                        CoverCache.put(path, bitmap)
+                                    }
+                                    bitmap
+                                } catch (e: Exception) {
+                                    null
                                 }
-                                bitmap
-                            } catch (e: Exception) {
-                                null
                             }
                         }
                     }
@@ -1393,7 +1405,7 @@ fun MiniPlayer(
                         .clip(RoundedCornerShape(21.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    val coverBitmap = localCoverBitmap
+                    val coverBitmap = cachedBitmap ?: localCoverBitmap
                     if (coverBitmap != null) {
                         Image(
                             bitmap = coverBitmap,
@@ -1427,8 +1439,8 @@ fun MiniPlayer(
                     Spacer(modifier = Modifier.height(2.dp))
                     
                     val percentage = (progressFraction * 100).toInt().coerceIn(0, 100)
-                    val wordsRemaining = remember(document.content, progressFraction) {
-                        val totalWords = document.content.split(Regex("\\s+")).filter { it.isNotBlank() }.size
+                    val wordsRemaining = remember(document.contentLength, progressFraction) {
+                        val totalWords = document.contentLength / 6
                         ((1f - progressFraction) * totalWords).toInt().coerceAtLeast(0)
                     }
                     val timeRemainingStr = remember(wordsRemaining, document.playbackSpeed) {

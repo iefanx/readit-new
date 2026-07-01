@@ -5,7 +5,7 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface DocumentDao {
-    @Query("SELECT * FROM documents ORDER BY lastReadTime DESC, addedDate DESC")
+    @Query("SELECT id, title, '' as content, sourceUrl, addedDate, playbackPosition, selectedModelTier, playbackSpeed, coverPath, lastReadTime, isFavorite, contentLength FROM documents ORDER BY lastReadTime DESC, addedDate DESC")
     fun getAllDocuments(): Flow<List<Document>>
 
     @Query("SELECT * FROM documents WHERE id = :id LIMIT 1")

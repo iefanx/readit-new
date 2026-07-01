@@ -15,5 +15,6 @@ data class Document(
     val playbackSpeed: Float = 1.0f,
     val coverPath: String? = null,
     val lastReadTime: Long = System.currentTimeMillis(),
-    val isFavorite: Boolean = false
+    val isFavorite: Boolean = false,
+    val contentLength: Int = 0
 )

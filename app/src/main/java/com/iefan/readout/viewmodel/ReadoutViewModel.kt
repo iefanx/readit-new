@@ -297,9 +297,11 @@ Here is what this app can do:
 
         ttsEngine.stop()
 
-        val updatedDoc = document.copy(lastReadTime = System.currentTimeMillis())
-        _activeDocument.value = updatedDoc
         viewModelScope.launch {
+            val fullDoc = documentRepository.getDocumentById(document.id) ?: document
+            val updatedDoc = fullDoc.copy(lastReadTime = System.currentTimeMillis())
+            _activeDocument.value = updatedDoc
+            
             documentRepository.update(updatedDoc)
             
             val chapters = documentRepository.getChaptersForDocument(updatedDoc.id)
@@ -554,7 +556,8 @@ Here is what this app can do:
                 title = title.ifBlank { "Untitled Document" },
                 content = content,
                 sourceUrl = sourceUrl?.ifBlank { null },
-                coverPath = coverPath
+                coverPath = coverPath,
+                contentLength = content.length
             )
             val generatedId = documentRepository.insert(doc)
             val createdDoc = doc.copy(id = generatedId)
