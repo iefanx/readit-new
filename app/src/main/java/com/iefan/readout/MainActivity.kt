@@ -1,12 +1,17 @@
 package com.iefan.readout
 
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
@@ -15,7 +20,6 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.iefan.readout.ui.components.SettingsDialog
 import com.iefan.readout.ui.screens.*
 import com.iefan.readout.ui.theme.MyApplicationTheme
@@ -25,6 +29,10 @@ import com.iefan.readout.data.Bookmark
 import com.iefan.readout.utils.InAppReviewHelper
 
 class MainActivity : ComponentActivity() {
+    private val viewModel: ReadoutViewModel by lazy {
+        androidx.lifecycle.ViewModelProvider(this)[ReadoutViewModel::class.java]
+    }
+
     private val requestNotificationPermissionLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
     ) { isGranted ->
@@ -45,8 +53,12 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        if (savedInstanceState == null) {
+            handleIntent(intent)
+        }
+
         setContent {
-            val viewModel: ReadoutViewModel = viewModel()
+            val viewModel = this@MainActivity.viewModel
             val themeColor by viewModel.themeColor.collectAsStateWithLifecycle()
 
             MyApplicationTheme(primaryColor = themeColor) {
@@ -69,17 +81,20 @@ class MainActivity : ComponentActivity() {
 
                 val isImporting by viewModel.isImporting.collectAsStateWithLifecycle()
                 val isPlayerExpanded by viewModel.isPlayerExpanded.collectAsStateWithLifecycle()
+                val isPreparingPlayback by viewModel.isPreparingPlayback.collectAsStateWithLifecycle()
                 val activeChapters by viewModel.activeChapters.collectAsStateWithLifecycle()
                 val activeBookmarks by viewModel.activeBookmarks.collectAsStateWithLifecycle()
                 val allBookmarks by viewModel.allBookmarks.collectAsStateWithLifecycle()
 
                 val progressFraction = remember(wordRange, sentences, currentIndex) {
                     val totalChars = if (sentences.isNotEmpty()) sentences.last().end else 0
-                    val currentCharIndex = wordRange?.first ?: (sentences.getOrNull(currentIndex)?.start ?: 0)
+                    val currentCharIndex = wordRange?.second ?: (sentences.getOrNull(currentIndex)?.start ?: 0)
                     if (totalChars > 0) currentCharIndex.toFloat() / totalChars else 0f
                 }
 
                 var showSettings by remember { mutableStateOf(false) }
+
+                val scope = rememberCoroutineScope()
 
                 BackHandler(enabled = isPlayerExpanded) {
                     viewModel.minimizePlayer()
@@ -90,6 +105,50 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val snackbarHostState = remember { SnackbarHostState() }
+
+                val importBackupLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.GetContent()
+                ) { uri: android.net.Uri? ->
+                    if (uri != null) {
+                        scope.launch {
+                            try {
+                                val jsonString = this@MainActivity.contentResolver.openInputStream(uri)?.use { input ->
+                                    input.bufferedReader().readText()
+                                }
+                                if (jsonString != null) {
+                                    val success = viewModel.importBackupData(jsonString)
+                                    if (success) {
+                                        snackbarHostState.showSnackbar("Data imported successfully!")
+                                    } else {
+                                        snackbarHostState.showSnackbar("Failed to import data: invalid format")
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                snackbarHostState.showSnackbar("Failed to read backup file: ${e.localizedMessage}")
+                            }
+                        }
+                    }
+                }
+
+                val exportBackupLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.CreateDocument("application/json")
+                ) { uri: android.net.Uri? ->
+                    if (uri != null) {
+                        scope.launch {
+                            try {
+                                val jsonString = viewModel.exportBackupData()
+                                this@MainActivity.contentResolver.openOutputStream(uri)?.use { output ->
+                                    output.bufferedWriter().use { writer ->
+                                        writer.write(jsonString)
+                                    }
+                                }
+                                snackbarHostState.showSnackbar("Data exported successfully!")
+                            } catch (e: Exception) {
+                                snackbarHostState.showSnackbar("Failed to export data: ${e.localizedMessage}")
+                            }
+                        }
+                    }
+                }
                 val importError by viewModel.importError.collectAsStateWithLifecycle()
 
                 LaunchedEffect(importError) {
@@ -222,6 +281,7 @@ class MainActivity : ComponentActivity() {
                             },
                             onRemoveBookmark = { bookmark -> viewModel.removeBookmark(bookmark) },
                             isTranslating = translationTargetLang != "none",
+                            isPreparingPlayback = isPreparingPlayback,
                             onSeekToFraction = { fraction -> viewModel.seekToFraction(fraction) }
                         )
                     }
@@ -236,10 +296,67 @@ class MainActivity : ComponentActivity() {
                             onSelectTranslationLang = { lang -> viewModel.setTranslationTargetLang(lang) },
                             themeColor = themeColor,
                             onThemeColorChange = { color -> viewModel.setThemeColor(color) },
+                            onImportData = {
+                                showSettings = false
+                                importBackupLauncher.launch("application/json")
+                            },
+                            onExportData = {
+                                showSettings = false
+                                exportBackupLauncher.launch("readout_backup_${System.currentTimeMillis()}.json")
+                            },
                             onDismiss = { showSettings = false }
                         )
                     }
                 }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        if (intent == null) return
+        val action = intent.action
+        val type = intent.type
+
+        Log.d("MainActivity", "handleIntent: action=$action, type=$type")
+
+        if (Intent.ACTION_SEND == action && type != null) {
+            if (type.startsWith("text/")) {
+                val text = intent.getStringExtra(Intent.EXTRA_TEXT)
+                if (!text.isNullOrBlank()) {
+                    val trimmed = text.trim()
+                    if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || 
+                        android.util.Patterns.WEB_URL.matcher(trimmed).matches()) {
+                        Log.d("MainActivity", "Importing Web URL from Intent: $trimmed")
+                        viewModel.importDocumentFromUrl(trimmed, null)
+                    } else {
+                        Log.d("MainActivity", "Importing plain text snippet from Intent")
+                        val titleSnippet = if (trimmed.length > 30) trimmed.take(27) + "..." else trimmed
+                        viewModel.addNewBook(title = "Shared: $titleSnippet", content = trimmed, sourceUrl = "Shared Text")
+                    }
+                }
+            } else {
+                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM)
+                }
+                if (uri != null) {
+                    Log.d("MainActivity", "Importing file URI via ACTION_SEND: $uri")
+                    viewModel.importDocumentFromUri(uri, null, autoSelect = true)
+                }
+            }
+        } else if (Intent.ACTION_VIEW == action) {
+            val uri = intent.data
+            if (uri != null) {
+                Log.d("MainActivity", "Importing file URI via ACTION_VIEW: $uri")
+                viewModel.importDocumentFromUri(uri, null, autoSelect = true)
             }
         }
     }

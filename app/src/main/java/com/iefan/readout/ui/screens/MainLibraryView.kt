@@ -2,6 +2,8 @@ package com.iefan.readout.ui.screens
 
 import android.graphics.BitmapFactory
 import android.net.Uri
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
@@ -103,12 +105,29 @@ fun MainLibraryView(
     var documentToEdit by remember { mutableStateOf<Document?>(null) }
     var activeOptionsDoc by remember { mutableStateOf<Document?>(null) }
 
+    val selectDocCallback = remember(onSelectDocument) {
+        { doc: Document ->
+            hapticTrigger()
+            onSelectDocument(doc)
+        }
+    }
+    val longSelectDocCallback = remember(hapticTrigger) {
+        { doc: Document ->
+            hapticTrigger()
+            activeOptionsDoc = doc
+        }
+    }
+
     val nonEvictCollections = remember(allCollections, allCrossRefs, allDocuments) {
+        // Group cross-refs by collectionId once (O(N)) instead of filtering per collection (O(N×M))
+        val crossRefsByCol = allCrossRefs.groupBy { it.collectionId }
         allCollections.map { col ->
-            val docIds = allCrossRefs.filter { it.collectionId == col.id }.map { it.documentId }.toSet()
+            val docIds = crossRefsByCol[col.id]?.map { it.documentId }?.toSet() ?: emptySet()
             col to allDocuments.filter { it.id in docIds }
         }.filter { it.second.isNotEmpty() }
     }
+
+    val favoriteDocs = remember(allDocuments) { allDocuments.filter { it.isFavorite } }
     var localCollections by remember(nonEvictCollections) {
         mutableStateOf(nonEvictCollections)
     }
@@ -120,6 +139,7 @@ fun MainLibraryView(
     var selectedFileName by remember { mutableStateOf("") }
 
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     // Activity launcher for picker supporting multi-upload
     val fileLauncher = rememberLauncherForActivityResult(
@@ -129,28 +149,37 @@ fun MainLibraryView(
             if (uris.size == 1) {
                 val uri = uris[0]
                 selectedFileUri = uri
-                var displayName = "Imported File"
-                context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                    val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                    if (nameIndex != -1 && cursor.moveToFirst()) {
-                        displayName = cursor.getString(nameIndex)
-                    }
-                }
-                selectedFileName = displayName
-                activeInputType = AddInputType.FILE
-                showAddDialog = true
-            } else {
-                // Multi-upload flow: import all selected files sequentially
-                uris.forEach { uri ->
+                // Query off main thread to avoid ANR risk on slow content providers
+                scope.launch {
                     var displayName = "Imported File"
-                    context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                        val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                        if (nameIndex != -1 && cursor.moveToFirst()) {
-                            displayName = cursor.getString(nameIndex)
+                    withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                            val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                            if (nameIndex != -1 && cursor.moveToFirst()) {
+                                displayName = cursor.getString(nameIndex)
+                            }
                         }
                     }
-                    val cleanTitle = displayName.substringBeforeLast(".")
-                    onUriImport(uri, cleanTitle, false)
+                    selectedFileName = displayName
+                    activeInputType = AddInputType.FILE
+                    showAddDialog = true
+                }
+            } else {
+                // Multi-upload flow: import all selected files sequentially off main thread
+                scope.launch {
+                    uris.forEach { uri ->
+                        var displayName = "Imported File"
+                        withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                                val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                                if (nameIndex != -1 && cursor.moveToFirst()) {
+                                    displayName = cursor.getString(nameIndex)
+                                }
+                            }
+                        }
+                        val cleanTitle = displayName.substringBeforeLast(".")
+                        onUriImport(uri, cleanTitle, false)
+                    }
                 }
             }
         }
@@ -327,14 +356,8 @@ fun MainLibraryView(
                                 items(allDocuments, key = { it.id }) { doc ->
                                     DocumentCard(
                                         document = doc,
-                                        onSelect = {
-                                            hapticTrigger()
-                                            onSelectDocument(doc)
-                                        },
-                                        onLongSelect = {
-                                            hapticTrigger()
-                                            activeOptionsDoc = doc
-                                        }
+                                        onSelect = selectDocCallback,
+                                        onLongSelect = longSelectDocCallback
                                     )
                                 }
                             }
@@ -342,7 +365,6 @@ fun MainLibraryView(
                     }
                 }
 
-                val favoriteDocs = allDocuments.filter { it.isFavorite }
                 if (favoriteDocs.isNotEmpty()) {
                     item {
                         // Heading 3: Favorites
@@ -364,14 +386,8 @@ fun MainLibraryView(
                                 items(favoriteDocs, key = { it.id }) { doc ->
                                     DocumentCard(
                                         document = doc,
-                                        onSelect = {
-                                            hapticTrigger()
-                                            onSelectDocument(doc)
-                                        },
-                                        onLongSelect = {
-                                            hapticTrigger()
-                                            activeOptionsDoc = doc
-                                        }
+                                        onSelect = selectDocCallback,
+                                        onLongSelect = longSelectDocCallback
                                     )
                                 }
                             }
@@ -518,14 +534,8 @@ fun MainLibraryView(
                                 items(colDocs, key = { it.id }) { doc ->
                                     DocumentCard(
                                         document = doc,
-                                        onSelect = {
-                                            hapticTrigger()
-                                            onSelectDocument(doc)
-                                        },
-                                        onLongSelect = {
-                                            hapticTrigger()
-                                            activeOptionsDoc = doc
-                                        }
+                                        onSelect = selectDocCallback,
+                                        onLongSelect = longSelectDocCallback
                                     )
                                 }
                             }
@@ -805,61 +815,95 @@ fun ActionCard(
     }
 }
 
+// Shared gradient palette — defined once at file level, never re-allocated
+private val COVER_GRADIENTS = listOf(
+    listOf(Color(0xFF1E3A8A), Color(0xFF0F172A)), // Sapphire Navy
+    listOf(Color(0xFF0F1E36), Color(0xFF1E293B)), // Slate Steel
+    listOf(Color(0xFF1E1B4B), Color(0xFF312E81)), // Twilight Midnight
+    listOf(Color(0xFF0F2027), Color(0xFF2C5364)), // Deep Ocean Teal
+    listOf(Color(0xFF022C22), Color(0xFF064E3B))  // Hunter Emerald
+)
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DocumentCard(
     document: Document,
-    onSelect: () -> Unit,
-    onLongSelect: () -> Unit,
+    onSelect: (Document) -> Unit,
+    onLongSelect: (Document) -> Unit,
     cardWidth: Dp = 135.dp,
     cardHeight: Dp = 175.dp
 ) {
-    val isPastedText = document.sourceUrl.isNullOrEmpty() || document.title.lowercase().contains("paste")
-    val isLink = document.sourceUrl?.startsWith("http", ignoreCase = true) == true ||
-                 document.sourceUrl?.startsWith("www.", ignoreCase = true) == true
-
-    val positionPercentage = if (document.contentLength > 0) {
-        (document.playbackPosition.getOrZeroPercent() * 100 / document.contentLength).coerceIn(0, 100)
-    } else 0
-
-    // Load cover bitmap from coverPath asynchronously, utilizing CoverCache
-    val cachedBitmap = remember(document.coverPath) {
-        document.coverPath?.let { CoverCache.get(it) }
+    // Derived flags — remembered to avoid recomputation on every recomposition
+    val isPastedText = remember(document.id, document.sourceUrl, document.title) {
+        document.sourceUrl.isNullOrEmpty() || document.title.lowercase().contains("paste")
+    }
+    val isLink = remember(document.id, document.sourceUrl) {
+        document.sourceUrl?.startsWith("http", ignoreCase = true) == true ||
+        document.sourceUrl?.startsWith("www.", ignoreCase = true) == true
+    }
+    val percentage = remember(document.id, document.playbackPosition, document.contentLength) {
+        if (document.contentLength > 0)
+            (document.playbackPosition.getOrZeroPercent().toFloat() / document.contentLength.toFloat()).coerceIn(0f, 1f)
+        else 0f
+    }
+    val coverGradient = remember(document.title) {
+        COVER_GRADIENTS[Math.abs(document.title.hashCode()) % COVER_GRADIENTS.size]
+    }
+    val iconVector = remember(isPastedText, isLink) {
+        when {
+            isPastedText -> Icons.Default.ContentPaste
+            isLink -> Icons.Default.Link
+            else -> Icons.Default.MenuBook
+        }
     }
 
-    val localCoverBitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(initialValue = cachedBitmap, key1 = document.coverPath) {
+    // Load cover bitmap from coverPath asynchronously, utilizing CoverCache.
+    // Decode at thumbnail size (max 512px) using inSampleSize to avoid loading multi-MB images
+    // for tiny 135dp cards — this is the #1 cause of GC-induced scroll jitter.
+    val cachedBitmap = remember(document.coverPath) {
+        document.coverPath?.let { path ->
+            if (CoverCache.isFailed(path)) null else CoverCache.get(path)
+        }
+    }
+
+    val localCoverBitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(
+        initialValue = cachedBitmap,
+        key1 = document.coverPath
+    ) {
         if (cachedBitmap == null) {
             value = document.coverPath?.let { path ->
-                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    try {
-                        val bitmap = BitmapFactory.decodeFile(path)?.asImageBitmap()
-                        if (bitmap != null) {
-                            CoverCache.put(path, bitmap)
+                if (CoverCache.isFailed(path)) {
+                    null
+                } else {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        try {
+                            // First pass: read dimensions only (no pixel allocation)
+                            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                            BitmapFactory.decodeFile(path, opts)
+                            // Compute power-of-two downsample so the image fits in ~512px
+                            val maxDim = 512
+                            var sample = 1
+                            while (opts.outWidth / (sample * 2) >= maxDim && opts.outHeight / (sample * 2) >= maxDim) {
+                                sample *= 2
+                            }
+                            // Second pass: decode at reduced resolution
+                            val decodeOpts = BitmapFactory.Options().apply {
+                                inSampleSize = sample
+                                inPreferredConfig = android.graphics.Bitmap.Config.RGB_565 // 2 bytes/px instead of 4
+                            }
+                            val bitmap = BitmapFactory.decodeFile(path, decodeOpts)?.asImageBitmap()
+                            if (bitmap != null) CoverCache.put(path, bitmap)
+                            else CoverCache.markFailed(path)
+                            bitmap
+                        } catch (e: Exception) {
+                            CoverCache.markFailed(path)
+                            null
                         }
-                        bitmap
-                    } catch (e: Exception) {
-                        null
                     }
                 }
             }
         }
     }
-
-    // Curated elegant gradients for default covers based on title hash
-    val coverGradients = remember {
-        listOf(
-            listOf(Color(0xFF1E3A8A), Color(0xFF0F172A)), // Sapphire Navy
-            listOf(Color(0xFF0F1E36), Color(0xFF1E293B)), // Slate Steel
-            listOf(Color(0xFF1E1B4B), Color(0xFF312E81)), // Twilight Midnight
-            listOf(Color(0xFF0F2027), Color(0xFF2C5364)), // Deep Ocean Teal
-            listOf(Color(0xFF022C22), Color(0xFF064E3B))  // Hunter Emerald
-        )
-    }
-
-    val gradientIndex = remember(document.title) {
-        Math.abs(document.title.hashCode()) % coverGradients.size
-    }
-    val coverGradient = coverGradients[gradientIndex]
 
     Column(
         modifier = Modifier
@@ -873,14 +917,13 @@ fun DocumentCard(
                 .height(cardHeight)
                 .clip(RoundedCornerShape(14.dp))
                 .combinedClickable(
-                    onClick = onSelect,
-                    onLongClick = onLongSelect
+                    onClick = { onSelect(document) },
+                    onLongClick = { onLongSelect(document) }
                 )
                 .testTag("document_card_${document.id}")
         ) {
             val coverBitmap = cachedBitmap ?: localCoverBitmap
             if (coverBitmap != null) {
-                // Real Extracted Vector/PDF Thumbnail Preview Cover
                 Image(
                     bitmap = coverBitmap,
                     contentDescription = "Document Cover Image",
@@ -888,7 +931,6 @@ fun DocumentCard(
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
-                // Typographic, highly premium minimalist cover design
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -899,7 +941,6 @@ fun DocumentCard(
                         modifier = Modifier.fillMaxSize(),
                         verticalArrangement = Arrangement.SpaceBetween
                     ) {
-                        // Top: Elegant typeset title with top padding
                         Text(
                             text = document.title,
                             fontFamily = androidx.compose.ui.text.font.FontFamily.Serif,
@@ -911,13 +952,6 @@ fun DocumentCard(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.padding(top = 8.dp)
                         )
-
-                        // Bottom Left: Document type icon
-                        val iconVector = when {
-                            isPastedText -> Icons.Default.ContentPaste
-                            isLink -> Icons.Default.Link
-                            else -> Icons.Default.MenuBook
-                        }
                         Icon(
                             imageVector = iconVector,
                             contentDescription = "Type",
@@ -929,10 +963,6 @@ fun DocumentCard(
             }
 
             // Visual Progress Strip at the bottom of the cover
-            val percentage = if (document.contentLength > 0) {
-                (document.playbackPosition.getOrZeroPercent().toFloat() / document.contentLength.toFloat()).coerceIn(0f, 1f)
-            } else 0f
-
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -951,7 +981,6 @@ fun DocumentCard(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Document Details beneath the cover card
         Text(
             text = document.title,
             maxLines = 2,
@@ -1366,21 +1395,30 @@ fun MiniPlayer(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 val cachedBitmap = remember(document.coverPath) {
-                    document.coverPath?.let { CoverCache.get(it) }
+                    document.coverPath?.let { path ->
+                        if (CoverCache.isFailed(path)) null else CoverCache.get(path)
+                    }
                 }
 
                 val localCoverBitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(initialValue = cachedBitmap, key1 = document.coverPath) {
                     if (cachedBitmap == null) {
                         value = document.coverPath?.let { path ->
-                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                try {
-                                    val bitmap = BitmapFactory.decodeFile(path)?.asImageBitmap()
-                                    if (bitmap != null) {
-                                        CoverCache.put(path, bitmap)
+                            if (CoverCache.isFailed(path)) {
+                                null
+                            } else {
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                    try {
+                                        val bitmap = BitmapFactory.decodeFile(path)?.asImageBitmap()
+                                        if (bitmap != null) {
+                                            CoverCache.put(path, bitmap)
+                                        } else {
+                                            CoverCache.markFailed(path)
+                                        }
+                                        bitmap
+                                    } catch (e: Exception) {
+                                        CoverCache.markFailed(path)
+                                        null
                                     }
-                                    bitmap
-                                } catch (e: Exception) {
-                                    null
                                 }
                             }
                         }
@@ -1438,35 +1476,36 @@ fun MiniPlayer(
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     
-                    val percentage = (progressFraction * 100).toInt().coerceIn(0, 100)
-                    val wordsRemaining = remember(document.contentLength, progressFraction) {
-                        val totalWords = document.contentLength / 6
-                        ((1f - progressFraction) * totalWords).toInt().coerceAtLeast(0)
-                    }
-                    val timeRemainingStr = remember(wordsRemaining, document.playbackSpeed) {
-                        val speed = if (document.playbackSpeed > 0f) document.playbackSpeed else 1.0f
-                        val totalSeconds = (wordsRemaining / (2.5f * speed)).toInt()
-                        if (totalSeconds <= 0) {
-                            "0s remaining"
-                        } else if (totalSeconds < 60) {
-                            "${totalSeconds}s remaining"
-                        } else {
-                            val totalMinutes = totalSeconds / 60
-                            if (totalMinutes < 60) {
-                                "${totalMinutes}m remaining"
+                    val infoText by remember(document, progressFraction) {
+                        derivedStateOf {
+                            val percentage = (progressFraction * 100).toInt().coerceIn(0, 100)
+                            val totalWords = document.contentLength / 6
+                            val wordsRemaining = ((1f - progressFraction) * totalWords).toInt().coerceAtLeast(0)
+                            val speed = if (document.playbackSpeed > 0f) document.playbackSpeed else 1.0f
+                            val totalSeconds = (wordsRemaining / (2.5f * speed)).toInt()
+                            val timeRemaining = if (totalSeconds <= 0) {
+                                "0s remaining"
+                            } else if (totalSeconds < 60) {
+                                "${totalSeconds}s remaining"
                             } else {
-                                val hours = totalMinutes / 60
-                                val mins = totalMinutes % 60
-                                if (mins > 0) {
-                                    "${hours}h ${mins}m remaining"
+                                val totalMinutes = totalSeconds / 60
+                                if (totalMinutes < 60) {
+                                    "${totalMinutes}m remaining"
                                 } else {
-                                    "${hours}h remaining"
+                                    val hours = totalMinutes / 60
+                                    val mins = totalMinutes % 60
+                                    if (mins > 0) {
+                                        "${hours}h ${mins}m remaining"
+                                    } else {
+                                        "${hours}h remaining"
+                                    }
                                 }
                             }
+                            "$percentage% / $timeRemaining"
                         }
                     }
                     Text(
-                        text = "$percentage% / $timeRemainingStr",
+                        text = infoText,
                         fontSize = 11.sp,
                         color = Color.Gray,
                         maxLines = 1,

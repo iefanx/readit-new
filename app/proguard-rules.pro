@@ -31,3 +31,7 @@
 
 # iTextG PDF processing rules
 -dontwarn com.itextpdf.**
+
+# Jsoup HTML Parser rules
+-keep class org.jsoup.** { *; }
+-dontwarn org.jsoup.**

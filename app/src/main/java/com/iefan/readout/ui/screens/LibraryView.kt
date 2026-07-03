@@ -85,6 +85,19 @@ fun LibraryView(
     var documentToEdit by remember { mutableStateOf<Document?>(null) }
     var activeOptionsDoc by remember { mutableStateOf<Document?>(null) }
 
+    val selectDocCallback = remember(onSelectDocument) {
+        { doc: Document ->
+            hapticTrigger()
+            onSelectDocument(doc)
+        }
+    }
+    val longSelectDocCallback = remember {
+        { doc: Document ->
+            hapticTrigger()
+            activeOptionsDoc = doc
+        }
+    }
+
     // Filter and sort books
     val filteredAndSortedDocuments = remember(allDocuments, searchQuery, sortBy, activeFilter, allCrossRefs) {
         allDocuments.filter {
@@ -303,15 +316,16 @@ fun LibraryView(
                         }
                     }
                 } else {
+                    val docTitleMap = remember(allDocuments) {
+                        allDocuments.associate { it.id to it.title }
+                    }
                     LazyColumn(
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                         contentPadding = PaddingValues(bottom = 24.dp)
                     ) {
                         items(filteredBookmarks, key = { it.id }) { bookmark ->
-                            val docTitle = remember(allDocuments, bookmark.documentId) {
-                                allDocuments.firstOrNull { it.id == bookmark.documentId }?.title ?: "Unknown Document"
-                            }
+                            val docTitle = docTitleMap[bookmark.documentId] ?: "Unknown Document"
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -401,14 +415,8 @@ fun LibraryView(
                         items(filteredAndSortedDocuments, key = { it.id }) { doc ->
                             DocumentCard(
                                 document = doc,
-                                onSelect = {
-                                    hapticTrigger()
-                                    onSelectDocument(doc)
-                                },
-                                onLongSelect = {
-                                    hapticTrigger()
-                                    activeOptionsDoc = doc
-                                },
+                                onSelect = selectDocCallback,
+                                onLongSelect = longSelectDocCallback,
                                 cardWidth = 95.dp,
                                 cardHeight = 125.dp
                             )
@@ -542,11 +550,13 @@ fun CollectionAssignDialog(
                             )
                         }
                     } else {
+                        val assignedCollectionIds = remember(allCrossRefs, document.id) {
+                            allCrossRefs.filter { it.documentId == document.id }
+                                .map { it.collectionId }.toSet()
+                        }
                         LazyColumn(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
                             items(allCollections, key = { it.id }) { col ->
-                                val isChecked = remember(allCrossRefs, col.id, document.id) {
-                                    allCrossRefs.any { it.collectionId == col.id && it.documentId == document.id }
-                                }
+                                val isChecked = col.id in assignedCollectionIds
 
                                 Row(
                                     modifier = Modifier

@@ -2,6 +2,7 @@ package com.iefan.readout.tts
 
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
@@ -64,6 +65,66 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
         get() = sentences.size
 
     private var tts: TextToSpeech? = null
+
+    private var audioFocusRequest: Any? = null
+
+    private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                Log.d("ReadoutTtsEngine", "Audio focus loss permanent: pausing.")
+                pausePlayback()
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                Log.d("ReadoutTtsEngine", "Audio focus loss transient: pausing.")
+                pausePlayback()
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                Log.d("ReadoutTtsEngine", "Audio focus gained.")
+            }
+        }
+    }
+
+    private fun requestAudioFocus(): Boolean {
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return false
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val focusRequest = android.media.AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(
+                    android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setAcceptsDelayedFocusGain(false)
+                .setOnAudioFocusChangeListener(audioFocusChangeListener)
+                .build()
+            audioFocusRequest = focusRequest
+            val result = audioManager.requestAudioFocus(focusRequest)
+            result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        } else {
+            @Suppress("DEPRECATION")
+            val result = audioManager.requestAudioFocus(
+                audioFocusChangeListener,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN
+            )
+            result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        }
+    }
+
+    private fun abandonAudioFocus() {
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val focusRequest = audioFocusRequest as? android.media.AudioFocusRequest
+            if (focusRequest != null) {
+                audioManager.abandonAudioFocusRequest(focusRequest)
+                audioFocusRequest = null
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.abandonAudioFocus(audioFocusChangeListener)
+        }
+    }
 
     private val _isInitialized = MutableStateFlow(false)
     val isInitialized = _isInitialized.asStateFlow()
@@ -182,9 +243,11 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
                     if (nextIndex < sentences.size) {
                         speakSentence(nextIndex, playbackState.token)
                     } else {
+                        val finalSentence = sentences.getOrNull(playbackState.sentenceIndex)
                         _isPlaying.value = false
-                        _currentWordRange.value = null
+                        _currentWordRange.value = finalSentence?.let { Pair(it.end, it.end) }
                         stopPlaybackService()
+                        abandonAudioFocus()
                     }
                 }
             }
@@ -194,6 +257,7 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
                 Log.e("ReadoutTtsEngine", "TTS error on sentence $utteranceId")
                 _isPlaying.value = false
                 _currentWordRange.value = null
+                abandonAudioFocus()
             }
 
             override fun onRangeStart(utteranceId: String?, start: Int, end: Int, frame: Int) {
@@ -237,6 +301,7 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
         invalidatePlaybackState(stopAudio = true)
         _isPlaying.value = false
         _currentWordRange.value = null
+        abandonAudioFocus()
     }
 
     fun stop() {
@@ -244,6 +309,7 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
         _isPlaying.value = false
         _currentWordRange.value = null
         stopPlaybackService()
+        abandonAudioFocus()
     }
 
     fun setSpeed(speed: Float) {
@@ -536,6 +602,7 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
     private fun restartPlaybackFromCurrentSentence() {
         val index = _currentSentenceIndex.value
         if (!_isInitialized.value || sentences.isEmpty() || index !in sentences.indices) return
+        requestAudioFocus()
         invalidatePlaybackState(stopAudio = true)
         _isPlaying.value = true
         speakSentence(index, activePlaybackToken)

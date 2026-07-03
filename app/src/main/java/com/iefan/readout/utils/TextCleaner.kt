@@ -7,11 +7,15 @@ object TextCleaner {
     private val PAGE_NUMBER_REGEX_1 = Regex("(?i)^\\s*page\\s+\\d+\\s*$")
     private val PAGE_NUMBER_REGEX_2 = Regex("(?i)^\\s*page\\s+\\d+\\s+of\\s+\\d+\\s*$")
     private val PAGE_NUMBER_REGEX_3 = Regex("^\\s*-\\s*\\d+\\s*-\\s*$")
-    private val PAGE_NUMBER_REGEX_4 = Regex("^\\s*\\d{2,}\\s*$") // 2 or more digits standalone (keeps single-digit headings)
+    private val PAGE_NUMBER_REGEX_4 = Regex("^\\s*\\d{2,}\\s*$") // 2 or more digits standalone
     private val PAGE_NUMBER_REGEX_5 = Regex("^\\s*\\d+\\s*/\\s*\\d+\\s*$")
     
     // URL regex
     private val URL_REGEX = Regex("https?://[^\\s/$.?#].[^\\s]*|www\\.[^\\s/$.?#].[^\\s]*")
+
+    // Pre-compiled to avoid allocating a new Regex object on every call to clean()
+    private val MULTIPLE_SPACES_REGEX = Regex(" {2,}")
+    private val SPACE_BEFORE_PUNCT_REGEX = Regex(" +([.,!?;:])")
 
     fun clean(text: String): String {
         if (text.isBlank()) return text
@@ -35,11 +39,11 @@ object TextCleaner {
 
         // 3. Clean up multiple consecutive spaces (collapsing them) while keeping newlines intact
         val collapsed = withoutCitations.split("\n")
-            .map { line -> line.replace(Regex(" {2,}"), " ").trimEnd() }
+            .map { line -> line.replace(MULTIPLE_SPACES_REGEX, " ").trimEnd() }
             .joinToString("\n")
 
         // 4. Remove spaces before punctuation (like periods, commas, colons, semicolons)
-        return collapsed.replace(Regex(" +([.,!?;:])"), "$1")
+        return collapsed.replace(SPACE_BEFORE_PUNCT_REGEX, "$1")
     }
 
     private fun isPageNumberOrHeader(trimmed: String): Boolean {

@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
@@ -23,6 +24,33 @@ class PlaybackService : Service() {
     private var mediaSession: MediaSession? = null
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var updatesJob: Job? = null
+
+    private var isNoisyReceiverRegistered = false
+
+    private val noisyReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (AudioManager.ACTION_AUDIO_BECOMING_NOISY == intent?.action) {
+                Log.d("PlaybackService", "ACTION_AUDIO_BECOMING_NOISY: pausing playback")
+                ReadoutTtsEngine.instance?.pausePlayback()
+            }
+        }
+    }
+
+    private fun registerNoisyReceiver() {
+        if (!isNoisyReceiverRegistered) {
+            registerReceiver(noisyReceiver, android.content.IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY))
+            isNoisyReceiverRegistered = true
+        }
+    }
+
+    private fun unregisterNoisyReceiver() {
+        if (isNoisyReceiverRegistered) {
+            try {
+                unregisterReceiver(noisyReceiver)
+            } catch (_: Exception) {}
+            isNoisyReceiverRegistered = false
+        }
+    }
 
     companion object {
         const val CHANNEL_ID = "readout_playback_channel"
@@ -55,6 +83,16 @@ class PlaybackService : Service() {
 
                 override fun onSkipToPrevious() {
                     ReadoutTtsEngine.instance?.skipBackward15s()
+                }
+
+                override fun onStop() {
+                    Log.d("PlaybackService", "MediaSession: onStop")
+                    ReadoutTtsEngine.instance?.stop()
+                }
+
+                override fun onSeekTo(pos: Long) {
+                    Log.d("PlaybackService", "MediaSession: onSeekTo $pos")
+                    ReadoutTtsEngine.instance?.seekToCharacter(pos.toInt())
                 }
             })
             isActive = true
@@ -113,16 +151,14 @@ class PlaybackService : Service() {
                     }
                 }
                 launch {
-                    engine.currentSentenceIndex.collect { index ->
+                    engine.currentSentenceIndex.collect {
                         updateNotification()
                         updateMediaSessionState()
                     }
                 }
-                launch {
-                    engine.currentWordRange.collect {
-                        updateMediaSessionState()
-                    }
-                }
+                // currentWordRange intentionally omitted: updating MediaSession on every
+                // word (~4x/sec) causes excessive system notification refreshes.
+                // Sentence-level granularity is sufficient for lock-screen position display.
             } else {
                 Log.w("PlaybackService", "ReadoutTtsEngine.instance is null during updates observation. Stopping service.")
                 stopForegroundService()
@@ -261,9 +297,17 @@ class PlaybackService : Service() {
         stopSelf()
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        Log.d("PlaybackService", "onTaskRemoved: app swiped away")
+        ReadoutTtsEngine.instance?.pausePlayback()
+        stopForegroundService()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         Log.d("PlaybackService", "Service onDestroy")
+        unregisterNoisyReceiver()
         updatesJob?.cancel()
         serviceScope.cancel()
         mediaSession?.release()

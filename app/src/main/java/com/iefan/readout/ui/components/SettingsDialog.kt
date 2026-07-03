@@ -45,6 +45,8 @@ fun SettingsDialog(
     onSelectTranslationLang: (String) -> Unit,
     themeColor: Color,
     onThemeColorChange: (Color) -> Unit,
+    onImportData: () -> Unit,
+    onExportData: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -315,6 +317,50 @@ fun SettingsDialog(
                                     contentDescription = "Go to theme color settings",
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        // Import & Export buttons
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Button(
+                                onClick = onImportData,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                ),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Upload,
+                                    contentDescription = "Import Data",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Import", fontSize = 14.sp)
+                            }
+
+                            Button(
+                                onClick = onExportData,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                ),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Download,
+                                    contentDescription = "Export Data",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Export", fontSize = 14.sp)
                             }
                         }
                     }

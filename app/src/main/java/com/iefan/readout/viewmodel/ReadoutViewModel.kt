@@ -1,6 +1,7 @@
 package com.iefan.readout.viewmodel
 
 import android.app.Application
+import android.util.Log
 import android.os.Build
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -21,11 +22,14 @@ import com.iefan.readout.tts.VoiceStatus
 import com.itextpdf.text.pdf.PdfReader
 import com.itextpdf.text.pdf.parser.PdfTextExtractor
 import org.jsoup.Jsoup
+import org.json.JSONObject
+import org.json.JSONArray
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -39,7 +43,20 @@ data class BenchmarkResult(
 
 data class ExtractedDocument(val content: String, val chapters: List<ChapterCandidate>)
 
+// Pre-compiled once at class level — avoids allocating a Regex on every line of text during PDF/EPUB parsing
+private val BULLET_LIST_REGEX = Regex("^\\d+\\.\\s+.*")
+
 class ReadoutViewModel(application: Application) : AndroidViewModel(application) {
+    private data class CachedSentences(
+        val contentHash: Int,
+        val sentences: List<SpeechSentence>
+    )
+
+    private val sentenceCache = object : LinkedHashMap<Long, CachedSentences>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, CachedSentences>?): Boolean {
+            return size > 6
+        }
+    }
 
     private val documentRepository: DocumentRepository
     private val ttsEngine: ReadoutTtsEngine
@@ -61,6 +78,9 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
 
     private val _isPlayerExpanded = MutableStateFlow(false)
     val isPlayerExpanded = _isPlayerExpanded.asStateFlow()
+
+    private val _isPreparingPlayback = MutableStateFlow(false)
+    val isPreparingPlayback = _isPreparingPlayback.asStateFlow()
 
     // Import visual loading state
     private val _isImporting = MutableStateFlow(false)
@@ -85,6 +105,7 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
 
     // Cancellable job that keeps activeBookmarks in sync with the current document
     private var bookmarkCollectionJob: kotlinx.coroutines.Job? = null
+    private var documentSelectionJob: Job? = null
 
     // State bindings straight from TTS Engine
     val isPlaying: StateFlow<Boolean>
@@ -194,23 +215,29 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
             }
         }
 
-        // Trigger preloads if we haven't preloaded v4 samples before
+        // Trigger preloads if we haven't preloaded v4 samples before.
+        // Use first() so this coroutine terminates after the initial DB emission instead
+        // of keeping an eternal Flow subscription alive for the ViewModel's lifetime.
         viewModelScope.launch {
-            allDocuments.collect { list ->
-                val hasPreloaded = sharedPrefs.getBoolean("has_preloaded_samples_v4", false)
-                if (!hasPreloaded) {
-                    // Delete old default sample books to clean up the library list
-                    for (doc in list) {
-                        if (doc.title == "The Art of Focus" || 
-                            doc.title == "A Brief History of Speed Audio" ||
-                            doc.title == "About this app, what this app can do" ||
-                            doc.title == "The Odyssey") {
-                            documentRepository.delete(doc)
-                        }
+            val hasPreloaded = sharedPrefs.getBoolean("has_preloaded_samples_v4", false)
+            if (!hasPreloaded) {
+                val list = allDocuments.first()
+                for (doc in list) {
+                    if (doc.title == "The Art of Focus" ||
+                        doc.title == "A Brief History of Speed Audio" ||
+                        doc.title == "About this app, what this app can do" ||
+                        doc.title == "The Odyssey") {
+                        documentRepository.delete(doc)
                     }
-                    preloadSampleBooks()
-                    sharedPrefs.edit().putBoolean("has_preloaded_samples_v4", true).apply()
                 }
+                preloadSampleBooks()
+                sharedPrefs.edit().putBoolean("has_preloaded_samples_v4", true).apply()
+            }
+        }
+
+        viewModelScope.launch {
+            allDocuments.collectLatest { docs ->
+                warmSentenceCache(docs.take(4))
             }
         }
     }
@@ -292,46 +319,54 @@ Here is what this app can do:
     fun selectDocument(document: Document) {
         if (_activeDocument.value?.id == document.id) {
             _isPlayerExpanded.value = true
+            ttsEngine.startPlayback()
             return
         }
 
+        documentSelectionJob?.cancel()
         ttsEngine.stop()
+        _isPreparingPlayback.value = true
+        _isPlayerExpanded.value = true
 
-        viewModelScope.launch {
-            val fullDoc = documentRepository.getDocumentById(document.id) ?: document
-            val updatedDoc = fullDoc.copy(lastReadTime = System.currentTimeMillis())
-            _activeDocument.value = updatedDoc
-            
-            documentRepository.update(updatedDoc)
-            
-            val chapters = documentRepository.getChaptersForDocument(updatedDoc.id)
-            _activeChapters.value = chapters
+        documentSelectionJob = viewModelScope.launch {
+            try {
+                val fullDoc = documentRepository.getDocumentById(document.id) ?: document
+                val updatedDoc = fullDoc.copy(lastReadTime = System.currentTimeMillis())
+                _activeDocument.value = updatedDoc
+                _activeSentences.value = getCachedSentences(updatedDoc).orEmpty()
+                documentRepository.update(updatedDoc)
 
-            // Collect bookmarks reactively — cancel any previous document's stream first
-            bookmarkCollectionJob?.cancel()
-            bookmarkCollectionJob = viewModelScope.launch {
-                documentRepository.getBookmarksForDocumentFlow(updatedDoc.id)
-                    .collect { bookmarks -> _activeBookmarks.value = bookmarks }
-            }
+                val chapters = documentRepository.getChaptersForDocument(updatedDoc.id)
+                _activeChapters.value = chapters
 
-            val parsedSentences = withContext(Dispatchers.Default) {
-                DocumentParser.parse(updatedDoc.content)
-            }
-            _activeSentences.value = parsedSentences
+                // Collect bookmarks reactively — cancel any previous document's stream first
+                bookmarkCollectionJob?.cancel()
+                bookmarkCollectionJob = viewModelScope.launch {
+                    documentRepository.getBookmarksForDocumentFlow(updatedDoc.id)
+                        .collect { bookmarks -> _activeBookmarks.value = bookmarks }
+                }
 
-            // Find best starting sentence index based on saved playback position
-            var savedSentenceIdx = 0
-            for ((idx, sent) in parsedSentences.withIndex()) {
-                if (updatedDoc.playbackPosition in sent.start..sent.end) {
-                    savedSentenceIdx = idx
-                    break
+                val parsedSentences = getOrParseSentences(updatedDoc)
+                _activeSentences.value = parsedSentences
+
+                // Find best starting sentence index based on saved playback position
+                var savedSentenceIdx = 0
+                for ((idx, sent) in parsedSentences.withIndex()) {
+                    if (updatedDoc.playbackPosition in sent.start..sent.end) {
+                        savedSentenceIdx = idx
+                        break
+                    }
+                }
+
+                ttsEngine.loadDocument(updatedDoc.id, parsedSentences, updatedDoc.title, savedSentenceIdx)
+                ttsEngine.setModelTier(updatedDoc.selectedModelTier)
+                ttsEngine.setSpeed(updatedDoc.playbackSpeed)
+                ttsEngine.startPlayback()
+            } finally {
+                if (_activeDocument.value?.id == document.id) {
+                    _isPreparingPlayback.value = false
                 }
             }
-
-            ttsEngine.loadDocument(updatedDoc.id, parsedSentences, updatedDoc.title, savedSentenceIdx)
-            ttsEngine.setModelTier(updatedDoc.selectedModelTier)
-            ttsEngine.setSpeed(updatedDoc.playbackSpeed)
-            _isPlayerExpanded.value = true
         }
     }
 
@@ -340,39 +375,48 @@ Here is what this app can do:
     }
 
     fun selectBookmark(bookmark: Bookmark) {
-        viewModelScope.launch {
-            val doc = documentRepository.getDocumentById(bookmark.documentId)
-            if (doc != null) {
-                if (_activeDocument.value?.id == doc.id) {
-                    seekToBookmark(bookmark)
+        documentSelectionJob?.cancel()
+        documentSelectionJob = viewModelScope.launch {
+            try {
+                val doc = documentRepository.getDocumentById(bookmark.documentId)
+                if (doc != null) {
+                    if (_activeDocument.value?.id == doc.id) {
+                        seekToBookmark(bookmark)
+                        _isPlayerExpanded.value = true
+                        ttsEngine.startPlayback()
+                        return@launch
+                    }
+
+                    ttsEngine.stop()
+                    _isPreparingPlayback.value = true
                     _isPlayerExpanded.value = true
-                    return@launch
+                    val updatedDoc = doc.copy(lastReadTime = System.currentTimeMillis())
+                    _activeDocument.value = updatedDoc
+                    _activeSentences.value = getCachedSentences(updatedDoc).orEmpty()
+                    documentRepository.update(updatedDoc)
+
+                    val chapters = documentRepository.getChaptersForDocument(updatedDoc.id)
+                    _activeChapters.value = chapters
+
+                    bookmarkCollectionJob?.cancel()
+                    bookmarkCollectionJob = viewModelScope.launch {
+                        documentRepository.getBookmarksForDocumentFlow(updatedDoc.id)
+                            .collect { bookmarks -> _activeBookmarks.value = bookmarks }
+                    }
+
+                    val parsedSentences = getOrParseSentences(updatedDoc)
+                    _activeSentences.value = parsedSentences
+
+                    val targetIndex = bookmark.sentenceIndex.coerceIn(0, maxOf(0, parsedSentences.size - 1))
+                    ttsEngine.loadDocument(updatedDoc.id, parsedSentences, updatedDoc.title, targetIndex)
+                    ttsEngine.setModelTier(updatedDoc.selectedModelTier)
+                    ttsEngine.setSpeed(updatedDoc.playbackSpeed)
+                    ttsEngine.startPlayback()
                 }
-
-                ttsEngine.stop()
-                val updatedDoc = doc.copy(lastReadTime = System.currentTimeMillis())
-                _activeDocument.value = updatedDoc
-                documentRepository.update(updatedDoc)
-
-                val chapters = documentRepository.getChaptersForDocument(updatedDoc.id)
-                _activeChapters.value = chapters
-
-                bookmarkCollectionJob?.cancel()
-                bookmarkCollectionJob = viewModelScope.launch {
-                    documentRepository.getBookmarksForDocumentFlow(updatedDoc.id)
-                        .collect { bookmarks -> _activeBookmarks.value = bookmarks }
+            } finally {
+                if (_activeDocument.value?.id == bookmark.documentId) {
+                    _isPreparingPlayback.value = false
                 }
-
-                val parsedSentences = withContext(Dispatchers.Default) {
-                    DocumentParser.parse(updatedDoc.content)
-                }
-                _activeSentences.value = parsedSentences
-
-                val targetIndex = bookmark.sentenceIndex.coerceIn(0, parsedSentences.size - 1)
-                ttsEngine.loadDocument(updatedDoc.id, parsedSentences, updatedDoc.title, targetIndex)
-                ttsEngine.setModelTier(updatedDoc.selectedModelTier)
-                ttsEngine.setSpeed(updatedDoc.playbackSpeed)
-                _isPlayerExpanded.value = true
             }
         }
     }
@@ -401,22 +445,18 @@ Here is what this app can do:
 
     fun seekToChapter(chapter: Chapter) {
         val sentencesList = _activeSentences.value
-        if (sentencesList.isNotEmpty()) {
-            var bestIdx = 0
-            var minDiff = Int.MAX_VALUE
-            for ((idx, sent) in sentencesList.withIndex()) {
-                val diff = Math.abs(sent.start - chapter.startCharOffset)
-                if (diff < minDiff) {
-                    minDiff = diff
-                    bestIdx = idx
-                }
-                if (sent.start >= chapter.startCharOffset) {
-                    bestIdx = idx
-                    break
-                }
-            }
-            seekToSentence(bestIdx)
+        if (sentencesList.isEmpty()) return
+        // Binary search: sentences are sorted by start offset, so O(log N) instead of O(N)
+        var lo = 0; var hi = sentencesList.lastIndex
+        while (lo < hi) {
+            val mid = (lo + hi) / 2
+            if (sentencesList[mid].start < chapter.startCharOffset) lo = mid + 1 else hi = mid
         }
+        // lo is now the first sentence whose start >= chapter.startCharOffset; back up one if closer
+        val bestIdx = if (lo > 0 &&
+            Math.abs(sentencesList[lo - 1].start - chapter.startCharOffset) <
+            Math.abs(sentencesList[lo].start - chapter.startCharOffset)) lo - 1 else lo
+        seekToSentence(bestIdx)
     }
 
     private fun saveCurrentPlaybackPosition() {
@@ -432,11 +472,13 @@ Here is what this app can do:
     }
 
     fun deselectDocument() {
+        documentSelectionJob?.cancel()
         saveCurrentPlaybackPosition()
         ttsEngine.stop()
         _activeDocument.value = null
         _activeSentences.value = emptyList()
         _isPlayerExpanded.value = false
+        _isPreparingPlayback.value = false
     }
 
     fun minimizePlayer() {
@@ -465,24 +507,17 @@ Here is what this app can do:
 
     fun seekToFraction(fraction: Float) {
         val sentences = _activeSentences.value
-        if (sentences.isNotEmpty()) {
-            val totalChars = sentences.last().end
-            val targetCharIndex = (fraction * totalChars).toInt()
-            var bestSentenceIdx = 0
-            var minDiff = Int.MAX_VALUE
-            for ((idx, sent) in sentences.withIndex()) {
-                if (targetCharIndex in sent.start..sent.end) {
-                    bestSentenceIdx = idx
-                    break
-                }
-                val diff = Math.abs(sent.start - targetCharIndex)
-                if (diff < minDiff) {
-                    minDiff = diff
-                    bestSentenceIdx = idx
-                }
-            }
-            seekToSentence(bestSentenceIdx)
+        if (sentences.isEmpty()) return
+        val totalChars = sentences.last().end
+        val targetChar = (fraction * totalChars).toInt()
+        // Binary search: sentences are sorted by start offset (O(log N) vs O(N) linear scan).
+        // Critical for smooth progress-bar scrubbing which fires events on every pixel of drag.
+        var lo = 0; var hi = sentences.lastIndex
+        while (lo < hi) {
+            val mid = (lo + hi) / 2
+            if (sentences[mid].end < targetChar) lo = mid + 1 else hi = mid
         }
+        seekToSentence(lo)
     }
 
     fun seekToSentence(index: Int) {
@@ -865,10 +900,10 @@ Here is what this app can do:
                         builder.setLength(builder.length - 1)
                         builder.append(currentLine)
                     } else {
-                        val isBulletList = currentLine.startsWith("-") || 
-                                           currentLine.startsWith("*") || 
-                                           currentLine.startsWith("•") || 
-                                           currentLine.matches(Regex("^\\d+\\.\\s+.*"))
+                        val isBulletList = currentLine.startsWith("-") ||
+                                           currentLine.startsWith("*") ||
+                                           currentLine.startsWith("•") ||
+                                           currentLine.matches(BULLET_LIST_REGEX)
                         if (isBulletList) {
                             builder.append("\n").append(currentLine)
                         } else {
@@ -955,10 +990,59 @@ Here is what this app can do:
             val result = StringBuilder()
             java.util.zip.ZipFile(file).use { zip ->
                 val entries = zip.entries().toList()
-                val textEntries = entries.filter { entry ->
-                    val name = entry.name.lowercase()
-                    !entry.isDirectory && (name.endsWith(".xhtml") || name.endsWith(".html") || name.endsWith(".htm"))
-                }.sortedBy { it.name }
+                
+                // Try to parse the OPF spine sequence for the correct reading order
+                val opfEntry = entries.firstOrNull { it.name.lowercase().endsWith(".opf") }
+                val resolvedEntries = mutableListOf<java.util.zip.ZipEntry>()
+                
+                if (opfEntry != null) {
+                    try {
+                        val opfContent = zip.getInputStream(opfEntry).bufferedReader(Charsets.UTF_8).readText()
+                        val opfDir = opfEntry.name.substringBeforeLast("/", "")
+                        val doc = org.jsoup.Jsoup.parse(opfContent, "", org.jsoup.parser.Parser.xmlParser())
+                        
+                        val manifestMap = mutableMapOf<String, String>()
+                        val manifestItems = doc.select("manifest > item")
+                        for (item in manifestItems) {
+                            val id = item.attr("id")
+                            val href = item.attr("href")
+                            if (id.isNotEmpty() && href.isNotEmpty()) {
+                                manifestMap[id] = href
+                            }
+                        }
+                        
+                        val spineItems = doc.select("spine > itemref")
+                        for (itemref in spineItems) {
+                            val idref = itemref.attr("idref")
+                            val href = manifestMap[idref] ?: continue
+                            val cleanHref = href.substringBefore("#")
+                            val fullPath = if (opfDir.isEmpty()) cleanHref else "$opfDir/$cleanHref"
+                            
+                            var entry = zip.getEntry(fullPath)
+                            if (entry == null) {
+                                try {
+                                    val decodedPath = java.net.URLDecoder.decode(fullPath, "UTF-8")
+                                    entry = zip.getEntry(decodedPath)
+                                } catch (_: Exception) {}
+                            }
+                            
+                            if (entry != null && !entry.isDirectory) {
+                                resolvedEntries.add(entry)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("ReadoutViewModel", "Failed to parse EPUB spine reading order, falling back to alphabetical", e)
+                    }
+                }
+                
+                // Fallback to alphabetical sorting if OPF spine parsing yields no files
+                var textEntries = resolvedEntries
+                if (textEntries.isEmpty()) {
+                    textEntries = entries.filter { entry ->
+                        val name = entry.name.lowercase()
+                        !entry.isDirectory && (name.endsWith(".xhtml") || name.endsWith(".html") || name.endsWith(".htm"))
+                    }.sortedBy { it.name }.toMutableList()
+                }
 
                 if (textEntries.isEmpty()) return@withContext ExtractedDocument("", emptyList())
 
@@ -1181,8 +1265,223 @@ Here is what this app can do:
             }
     }
 
+    suspend fun exportBackupData(): String = withContext(Dispatchers.IO) {
+        val rootJson = JSONObject()
+        
+        // 1. Export Documents
+        val documentsArray = JSONArray()
+        val docsList = allDocuments.value
+        val bookmarksList = allBookmarks.value
+        
+        for (metaDoc in docsList) {
+            val fullDoc = documentRepository.getDocumentById(metaDoc.id) ?: continue
+            val docJson = JSONObject().apply {
+                put("title", fullDoc.title)
+                put("content", fullDoc.content)
+                put("sourceUrl", fullDoc.sourceUrl)
+                put("addedDate", fullDoc.addedDate)
+                put("playbackPosition", fullDoc.playbackPosition)
+                put("selectedModelTier", fullDoc.selectedModelTier)
+                put("playbackSpeed", fullDoc.playbackSpeed)
+                put("coverPath", fullDoc.coverPath)
+                put("lastReadTime", fullDoc.lastReadTime)
+                put("isFavorite", fullDoc.isFavorite)
+                put("contentLength", fullDoc.contentLength)
+            }
+            
+            // Nested Bookmarks
+            val docBookmarks = bookmarksList.filter { it.documentId == fullDoc.id }
+            val bookmarksArray = JSONArray()
+            for (bm in docBookmarks) {
+                bookmarksArray.put(JSONObject().apply {
+                    put("sentenceIndex", bm.sentenceIndex)
+                    put("charOffset", bm.charOffset)
+                    put("label", bm.label)
+                    put("createdAt", bm.createdAt)
+                })
+            }
+            docJson.put("bookmarks", bookmarksArray)
+            
+            // Nested Chapters
+            val chaptersList = documentRepository.getChaptersForDocument(fullDoc.id)
+            val chaptersArray = JSONArray()
+            for (ch in chaptersList) {
+                chaptersArray.put(JSONObject().apply {
+                    put("title", ch.title)
+                    put("startCharOffset", ch.startCharOffset)
+                    put("startSentenceIndex", ch.startSentenceIndex)
+                })
+            }
+            docJson.put("chapters", chaptersArray)
+            
+            documentsArray.put(docJson)
+        }
+        rootJson.put("documents", documentsArray)
+        
+        // 2. Export Collections
+        val collectionsArray = JSONArray()
+        val collectionsList = allCollections.value
+        val crossRefsList = allCrossRefs.value
+        
+        for (col in collectionsList) {
+            val colJson = JSONObject().apply {
+                put("name", col.name)
+                put("addedDate", col.addedDate)
+            }
+            
+            val documentTitlesArray = JSONArray()
+            val docIdsInCol = crossRefsList.filter { it.collectionId == col.id }.map { it.documentId }
+            for (docId in docIdsInCol) {
+                val docTitle = docsList.firstOrNull { it.id == docId }?.title
+                if (docTitle != null) {
+                    documentTitlesArray.put(docTitle)
+                }
+            }
+            colJson.put("documentTitles", documentTitlesArray)
+            collectionsArray.put(colJson)
+        }
+        rootJson.put("collections", collectionsArray)
+        
+        rootJson.toString(2)
+    }
+
+    suspend fun importBackupData(jsonString: String): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val rootJson = JSONObject(jsonString)
+            
+            val documentsArray = rootJson.optJSONArray("documents") ?: JSONArray()
+            val titleToNewIdMap = mutableMapOf<String, Long>()
+            
+            for (i in 0 until documentsArray.length()) {
+                val docJson = documentsArray.getJSONObject(i)
+                val title = docJson.getString("title")
+                val content = docJson.getString("content")
+                val sourceUrl = if (docJson.has("sourceUrl") && !docJson.isNull("sourceUrl")) docJson.getString("sourceUrl") else null
+                val addedDate = docJson.optLong("addedDate", System.currentTimeMillis())
+                val playbackPosition = docJson.optInt("playbackPosition", 0)
+                val selectedModelTier = docJson.optString("selectedModelTier", "HIGH_FIDELITY")
+                val playbackSpeed = docJson.optDouble("playbackSpeed", 1.0).toFloat()
+                val coverPath = if (docJson.has("coverPath") && !docJson.isNull("coverPath")) docJson.getString("coverPath") else null
+                val lastReadTime = docJson.optLong("lastReadTime", System.currentTimeMillis())
+                val isFavorite = docJson.optBoolean("isFavorite", false)
+                val contentLength = docJson.optInt("contentLength", content.length)
+                
+                val doc = Document(
+                    title = title,
+                    content = content,
+                    sourceUrl = sourceUrl,
+                    addedDate = addedDate,
+                    playbackPosition = playbackPosition,
+                    selectedModelTier = selectedModelTier,
+                    playbackSpeed = playbackSpeed,
+                    coverPath = coverPath,
+                    lastReadTime = lastReadTime,
+                    isFavorite = isFavorite,
+                    contentLength = contentLength
+                )
+                
+                val newDocId = documentRepository.insert(doc)
+                titleToNewIdMap[title] = newDocId
+                
+                // Nest Bookmarks
+                val bookmarksArray = docJson.optJSONArray("bookmarks") ?: JSONArray()
+                for (j in 0 until bookmarksArray.length()) {
+                    val bmJson = bookmarksArray.getJSONObject(j)
+                    val bookmark = Bookmark(
+                        documentId = newDocId,
+                        sentenceIndex = bmJson.getInt("sentenceIndex"),
+                        charOffset = bmJson.getInt("charOffset"),
+                        label = bmJson.getString("label"),
+                        createdAt = bmJson.optLong("createdAt", System.currentTimeMillis())
+                    )
+                    documentRepository.insertBookmark(bookmark)
+                }
+                
+                // Nest Chapters
+                val chaptersArray = docJson.optJSONArray("chapters") ?: JSONArray()
+                val chaptersList = mutableListOf<Chapter>()
+                for (j in 0 until chaptersArray.length()) {
+                    val chJson = chaptersArray.getJSONObject(j)
+                    chaptersList.add(
+                        Chapter(
+                            documentId = newDocId,
+                            title = chJson.getString("title"),
+                            startCharOffset = chJson.getInt("startCharOffset"),
+                            startSentenceIndex = chJson.optInt("startSentenceIndex", 0)
+                        )
+                    )
+                }
+                if (chaptersList.isNotEmpty()) {
+                    documentRepository.insertChapters(chaptersList)
+                }
+            }
+            
+            // Collections
+            val collectionsArray = rootJson.optJSONArray("collections") ?: JSONArray()
+            for (i in 0 until collectionsArray.length()) {
+                val colJson = collectionsArray.getJSONObject(i)
+                val name = colJson.getString("name")
+                val addedDate = colJson.optLong("addedDate", System.currentTimeMillis())
+                
+                val col = CollectionEntity(name = name, addedDate = addedDate)
+                val newColId = documentRepository.insertCollection(col)
+                
+                val documentTitlesArray = colJson.optJSONArray("documentTitles") ?: JSONArray()
+                for (j in 0 until documentTitlesArray.length()) {
+                    val docTitle = documentTitlesArray.getString(j)
+                    val newDocId = titleToNewIdMap[docTitle]
+                    if (newDocId != null) {
+                        documentRepository.addDocumentToCollection(newDocId, newColId)
+                    }
+                }
+            }
+            true
+        } catch (e: Exception) {
+            Log.e("ReadoutViewModel", "Failed to import backup data", e)
+            false
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
+        documentSelectionJob?.cancel()
+        bookmarkCollectionJob?.cancel()
         ttsEngine.shutdown()
+    }
+
+    private suspend fun getOrParseSentences(document: Document): List<SpeechSentence> {
+        getCachedSentences(document)?.let { return it }
+
+        val parsedSentences = withContext(Dispatchers.Default) {
+            DocumentParser.parse(document.content)
+        }
+        putCachedSentences(document, parsedSentences)
+        return parsedSentences
+    }
+
+    private fun getCachedSentences(document: Document): List<SpeechSentence>? {
+        val contentHash = document.content.hashCode()
+        return synchronized(sentenceCache) {
+            sentenceCache[document.id]?.takeIf { it.contentHash == contentHash }?.sentences
+        }
+    }
+
+    private fun putCachedSentences(document: Document, sentences: List<SpeechSentence>) {
+        val contentHash = document.content.hashCode()
+        synchronized(sentenceCache) {
+            sentenceCache[document.id] = CachedSentences(contentHash, sentences)
+        }
+    }
+
+    private suspend fun warmSentenceCache(documents: List<Document>) {
+        documents.forEach { summaryDoc ->
+            val fullDoc = documentRepository.getDocumentById(summaryDoc.id) ?: return@forEach
+            if (getCachedSentences(fullDoc) == null && fullDoc.content.isNotBlank()) {
+                val parsed = withContext(Dispatchers.Default) {
+                    DocumentParser.parse(fullDoc.content)
+                }
+                putCachedSentences(fullDoc, parsed)
+            }
+        }
     }
 }

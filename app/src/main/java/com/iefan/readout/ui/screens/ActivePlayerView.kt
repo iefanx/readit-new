@@ -77,6 +77,7 @@ fun ActivePlayerView(
     onAddBookmark: (sentenceIndex: Int, charOffset: Int, label: String) -> Unit,
     onRemoveBookmark: (Bookmark) -> Unit,
     isTranslating: Boolean,
+    isPreparingPlayback: Boolean,
     onSeekToFraction: (Float) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -106,12 +107,20 @@ fun ActivePlayerView(
         }
     }
 
-    // Dynamic estimated remaining time calculations
-    val wordsRemaining = remember(currentSentenceIndex, sentences) {
-        if (currentSentenceIndex in sentences.indices) {
-            sentences.subList(currentSentenceIndex, sentences.size).sumOf { sentence ->
-                sentence.text.split(Regex("\\s+")).filter { it.isNotBlank() }.size
-            }
+    // Compute word count suffix sums once for O(1) dynamic remaining time lookup
+    val suffixWordSums = remember(sentences) {
+        val sums = IntArray(sentences.size + 1)
+        var cumulative = 0
+        for (i in sentences.indices.reversed()) {
+            cumulative += sentences[i].words.size
+            sums[i] = cumulative
+        }
+        sums
+    }
+
+    val wordsRemaining = remember(currentSentenceIndex, suffixWordSums) {
+        if (currentSentenceIndex in suffixWordSums.indices) {
+            suffixWordSums[currentSentenceIndex]
         } else {
             0
         }
@@ -280,6 +289,31 @@ fun ActivePlayerView(
                 },
                 modifier = Modifier.fillMaxSize()
             )
+
+            if (isPreparingPlayback && sentences.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.7f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "Opening ${document.title}",
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 24.dp)
+                        )
+                    }
+                }
+            }
 
             // Overlaid Panel floating elegantly over the e-reader viewport
             Box(

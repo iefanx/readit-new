@@ -17,8 +17,8 @@ android {
     applicationId = "com.iefan.readout"
     minSdk = 24
     targetSdk = 36
-    versionCode = 32
-    versionName = "1.5.2"
+    versionCode = 33
+    versionName = "1.5.3"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
