@@ -73,7 +73,14 @@ class TextCleanerTest {
     fun testSpokenTextNormalizer() {
         val input = "The price was $24.50 (or $10) with a 15% discount for Chapter IV. She had 1/2 share — truly amazing..."
         val normalized = com.iefan.readout.tts.SpokenTextNormalizer.normalizeForSpeech(input)
-        assertEquals("The price was 24 dollars and 50 cents (or 10 dollars) with a 15 percent discount for Chapter 4. She had one half share, truly amazing,", normalized)
+        assertEquals("The price was 24 dollars and 50 cents (or 10 dollars) with a 15 percent discount for Chapter 4. She had one half share, truly amazing.", normalized)
+    }
+
+    @Test
+    fun testSpokenTextNormalizerQuotesAndAbbreviations() {
+        val input = "\"Dr. Watson,\" said Mr. Holmes, \"the case vs. Moriarty is 99% solved!\""
+        val normalized = com.iefan.readout.tts.SpokenTextNormalizer.normalizeForSpeech(input)
+        assertEquals("Doctor Watson, said Mister Holmes, the case versus Moriarty is 99 percent solved!", normalized)
     }
 
     @Test

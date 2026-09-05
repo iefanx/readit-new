@@ -47,14 +47,49 @@ object DocumentParser {
         return ABBREVIATIONS.contains(lastWord)
     }
 
+    private fun findParagraphEnd(text: String, start: Int): Int {
+        val len = text.length
+        var idx = start
+        while (idx < len) {
+            val nextNewline = text.indexOf('\n', idx)
+            if (nextNewline == -1) return len
+
+            // 1. Double newline (blank line) -> unambiguous paragraph break
+            var cursor = nextNewline + 1
+            while (cursor < len && (text[cursor] == ' ' || text[cursor] == '\t')) {
+                cursor++
+            }
+            if (cursor < len && text[cursor] == '\n') {
+                return nextNewline
+            }
+
+            // 2. Check if line before nextNewline ends with terminal punctuation AND next line is a bullet/number
+            val lineBefore = text.substring(start, nextNewline).trimEnd()
+            val remaining = text.substring(nextNewline + 1).trimStart()
+            val endsWithTerminal = lineBefore.endsWith('.') || lineBefore.endsWith('!') ||
+                    lineBefore.endsWith('?') || lineBefore.endsWith(':') ||
+                    lineBefore.endsWith('"') || lineBefore.endsWith('”') || lineBefore.endsWith('’')
+
+            val startsWithBulletOrNumber = remaining.startsWith("- ") || remaining.startsWith("* ") ||
+                    remaining.startsWith("• ") || remaining.matches(Regex("""^\d+\.\s+.*"""))
+
+            if (endsWithTerminal && startsWithBulletOrNumber) {
+                return nextNewline
+            }
+
+            // Otherwise, line wrap inside the same paragraph
+            idx = nextNewline + 1
+        }
+        return len
+    }
+
     fun parse(rawText: String): List<SpeechSentence> {
         val text = TextCleaner.clean(rawText)
         val sentences = mutableListOf<SpeechSentence>()
         if (text.isBlank()) return sentences
 
-        // An intelligent regex-based sentence boundary detector that does not split on decimal numbers (e.g. 13.8)
-        // Matches punctuation and closing quotes/brackets attached to sentence ends
-        val sentenceRegex = Regex("((?:[^.!?\\n]|\\.(?!\\s|\\$))+[.!?]*[\"”’')\\]]*\\s*)")
+        // Matches sentence boundary ending with punctuation + quotes + whitespace, or trailing text
+        val sentenceRegex = Regex("((?:[^.!?]|\\.(?!\\s|$))+[.!?]*[\"”’')\\]]*(?:\\s+|$)|(?:[^.!?]|\\.(?!\\s|$))+$)")
         val wordRegex = Regex("[\\p{L}\\p{M}\\p{N}']+")
 
         var sentenceIndex = 0
@@ -63,13 +98,16 @@ object DocumentParser {
         val len = text.length
 
         while (start < len) {
-            var end = text.indexOf('\n', start)
-            if (end == -1) {
-                end = len
+            var end = findParagraphEnd(text, start)
+            if (end == start) {
+                // Skip past newlines/whitespace
+                while (start < len && (text[start] == '\n' || text[start].isWhitespace())) {
+                    start++
+                }
+                continue
             }
 
             if (start < end) {
-                // Quick content check to avoid regex running on purely whitespace lines
                 var hasContent = false
                 for (i in start until end) {
                     if (!text[i].isWhitespace()) {
@@ -144,7 +182,10 @@ object DocumentParser {
                 }
             }
 
-            start = end + 1
+            start = end
+            while (start < len && (text[start] == '\n' || text[start].isWhitespace())) {
+                start++
+            }
         }
         return sentences
     }

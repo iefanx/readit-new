@@ -1,9 +1,11 @@
 package com.iefan.readout.tts
 
+import java.util.Locale
+
 /**
  * Normalizes text prior to passing to TextToSpeech engine so it sounds warm, natural,
  * and human. Expands currencies, percentages, fractions, Roman numerals in chapters,
- * and injects breath/clause cadence at em-dashes and ellipses without affecting the UI text.
+ * abbreviations, and injects breath/clause cadence at em-dashes and ellipses without affecting the UI text.
  */
 object SpokenTextNormalizer {
     // Currencies with cents & whole numbers
@@ -38,7 +40,7 @@ object SpokenTextNormalizer {
 
     // Em-dashes and hyphens for breathing cadence: "—", "--" -> ", "
     private val EM_DASH_REGEX = Regex("""\s*—\s*|\s*--\s*""")
-    
+
     // Ellipses for natural pauses: "...", "…" -> ", "
     private val ELLIPSIS_REGEX = Regex("""\s*(?:\.{3,}|…)\s*""")
 
@@ -54,15 +56,32 @@ object SpokenTextNormalizer {
         if (rawText.isBlank()) return rawText
         var text = rawText
 
-        // 1. Em-dashes, Ellipses, Semicolons & Colons: Shape into natural human breathing and clause intervals
+        // 1. Remove non-phonetic quotation marks around text and punctuation
+        // Prevents TTS from verbalizing quote characters or hesitating before/after quotes
+        text = text.replace(Regex("""["“”«»]"""), "")
+        text = text.replace('‘', ' ')
+        // Remove standalone single quotes around words while preserving contractions like don't, it's
+        text = text.replace(Regex("""(?<=\s|^)'+|'+(?=\s|$)"""), " ")
+
+        // 2. Em-dashes, Ellipses, Semicolons & Colons: Shape into natural human breathing and clause intervals
         text = text.replace(EM_DASH_REGEX, ", ")
         text = text.replace(ELLIPSIS_REGEX, ", ")
         text = text.replace(Regex("""(?<=\w)\s*;\s*(?=\w)"""), ", ")
         text = text.replace(Regex("""(?<=\w)\s*:\s*(?=\w)"""), ", ")
-        // Dialogue quotes: strip quotes right after punctuation so TTS pauses naturally on terminal marks
-        text = text.replace(Regex("""(?<=[.!?])\s*["”'»]+\s*"""), " ")
 
-        // 2. Currencies with cents
+        // 3. Spoken abbreviations expansion for effortless prosody
+        text = text.replace(Regex("""\bDr\.\s*([A-Z])"""), "Doctor $1")
+        text = text.replace(Regex("""\bMr\.\s*([A-Z])"""), "Mister $1")
+        text = text.replace(Regex("""\bMrs\.\s*([A-Z])"""), "Missus $1")
+        text = text.replace(Regex("""\bMs\.\s*([A-Z])"""), "Ms $1")
+        text = text.replace(Regex("""\bProf\.\s*([A-Z])"""), "Professor $1")
+        text = text.replace(Regex("""\bvs\.\s*""", RegexOption.IGNORE_CASE), "versus ")
+        text = text.replace(Regex("""\be\.g\.,?\s*""", RegexOption.IGNORE_CASE), "for example, ")
+        text = text.replace(Regex("""\bi\.e\.,?\s*""", RegexOption.IGNORE_CASE), "that is, ")
+        text = text.replace(Regex("""\betc\.\s*""", RegexOption.IGNORE_CASE), "etcetera ")
+        text = text.replace(Regex("""\betc\.$""", RegexOption.IGNORE_CASE), "etcetera.")
+
+        // 4. Currencies with cents
         text = text.replace(USD_CENTS_REGEX) { match ->
             val dollars = match.groupValues[1]
             val cents = match.groupValues[2]
@@ -91,17 +110,17 @@ object SpokenTextNormalizer {
             "${match.groupValues[1]} rupees"
         }
 
-        // 3. Percentages
+        // 5. Percentages
         text = text.replace(PERCENT_REGEX) { match ->
             "${match.groupValues[1]} percent"
         }
 
-        // 4. Fractions
+        // 6. Fractions
         for ((pattern, replacement) in FRACTION_MAP) {
             text = text.replace(pattern, replacement)
         }
 
-        // 5. Units
+        // 7. Units
         text = text.replace(SPEED_KMH_REGEX) { match ->
             "${match.groupValues[1]} kilometers per hour"
         }
@@ -109,23 +128,26 @@ object SpokenTextNormalizer {
             "${match.groupValues[1]} miles per hour"
         }
 
-        // 6. Roman numerals in chapters / parts
+        // 8. Roman numerals in chapters / parts
         text = text.replace(CHAPTER_ROMAN_REGEX) { match ->
             val prefix = match.groupValues[1]
-            val roman = match.groupValues[2].uppercase()
+            val roman = match.groupValues[2].uppercase(Locale.ROOT)
             val arabic = ROMAN_NUMERALS[roman] ?: roman
             "$prefix $arabic"
         }
 
-        // 7. Symbols
+        // 9. Symbols
         text = text.replace(AMPERSAND_REGEX, " and ")
         text = text.replace(PLUS_SIGN_REGEX, " plus ")
 
-        // 8. Clean up redundant spaces and comma clusters
-        text = text.replace(Regex("\\s*,\\s*,"), ",")
-        text = text.replace(Regex("\\s+,"), ",")
-        text = text.replace(Regex(",\\s*\\."), ".")
-        text = text.replace(Regex("\\s+"), " ").trim()
+        // 10. Clean up punctuation, spaces and trailing comma cadence
+        text = text.replace(Regex("""\s+([,;:.!?])"""), "$1")
+        text = text.replace(Regex("""(,\s*)+,"""), ", ")
+        text = text.replace(Regex(""",\s*,"""), ", ")
+        text = text.replace(Regex(""",\s*([.!?])"""), "$1")
+        text = text.replace(Regex(""",\s*$"""), ".")
+        text = text.replace(Regex("""([,;:.!?])(?=[^\s,;:.!?])"""), "$1 ")
+        text = text.replace(Regex("""\s+"""), " ").trim()
 
         return text
     }
