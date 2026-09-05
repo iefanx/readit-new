@@ -350,49 +350,82 @@ fun SettingsDialog(
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                        }
 
-                        Spacer(modifier = Modifier.height(16.dp))
-
-                        // Import & Export buttons
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Button(
-                                onClick = onImportData,
-                                modifier = Modifier.weight(1f),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                                ),
-                                shape = RoundedCornerShape(12.dp)
+                            // Category: Backup & Restore
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f))
+                                    .border(
+                                        1.dp,
+                                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                        RoundedCornerShape(16.dp)
+                                    )
+                                    .padding(16.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.Upload,
-                                    contentDescription = "Import Data",
-                                    modifier = Modifier.size(18.dp)
+                                    imageVector = Icons.Default.Storage,
+                                    contentDescription = "Data Backup & Restore",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(24.dp)
                                 )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("Import", fontSize = 14.sp)
-                            }
-
-                            Button(
-                                onClick = onExportData,
-                                modifier = Modifier.weight(1f),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                                ),
-                                shape = RoundedCornerShape(12.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Download,
-                                    contentDescription = "Export Data",
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("Export", fontSize = 14.sp)
+                                Spacer(modifier = Modifier.width(16.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Backup & Restore",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = "Import or export library data",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OutlinedButton(
+                                        onClick = onImportData,
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = androidx.compose.foundation.BorderStroke(
+                                            1.dp,
+                                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+                                        ),
+                                        modifier = Modifier.height(34.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Upload,
+                                            contentDescription = "Import",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Import", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+                                    }
+                                    OutlinedButton(
+                                        onClick = onExportData,
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = androidx.compose.foundation.BorderStroke(
+                                            1.dp,
+                                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+                                        ),
+                                        modifier = Modifier.height(34.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Download,
+                                            contentDescription = "Export",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Export", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+                                    }
+                                }
                             }
                         }
                     }
@@ -513,41 +546,23 @@ fun SettingsDialog(
                                                 color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
                                                 modifier = Modifier.weight(1f, fill = false)
                                             )
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            
-                                            // Status Badge
-                                            val (badgeText, badgeColor, badgeIcon) = when (voiceInfo.status) {
-                                                VoiceStatus.DOWNLOADED -> Triple("Offline", MaterialTheme.colorScheme.primary, null)
-                                                VoiceStatus.NETWORK_REQUIRED -> Triple("Network", Color(0xFF0288D1), Icons.Default.Cloud)
-                                                VoiceStatus.DOWNLOADABLE -> Triple("Downloadable", Color(0xFFE65100), Icons.Default.Download)
-                                            }
-                                            
-                                            Surface(
-                                                shape = RoundedCornerShape(8.dp),
-                                                color = badgeColor.copy(alpha = 0.15f),
-                                                modifier = Modifier.padding(vertical = 2.dp)
-                                            ) {
-                                                Row(
-                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    if (badgeIcon != null) {
-                                                        Icon(
-                                                            imageVector = badgeIcon,
-                                                            contentDescription = null,
-                                                            tint = badgeColor,
-                                                            modifier = Modifier.size(10.dp)
-                                                        )
-                                                        Spacer(modifier = Modifier.width(4.dp))
-                                                    }
-                                                    Text(
-                                                        text = badgeText,
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        fontSize = 9.sp,
-                                                        fontWeight = FontWeight.Bold,
-                                                        color = badgeColor
-                                                    )
-                                                }
+                                            // Minimalist status icon
+                                            if (voiceInfo.status == VoiceStatus.DOWNLOADED) {
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Icon(
+                                                    imageVector = Icons.Default.DownloadDone,
+                                                    contentDescription = "Downloaded / Offline Ready",
+                                                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
+                                                    modifier = Modifier.size(15.dp)
+                                                )
+                                            } else if (voiceInfo.status == VoiceStatus.DOWNLOADABLE) {
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Icon(
+                                                    imageVector = Icons.Default.Download,
+                                                    contentDescription = "Download Required",
+                                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                                    modifier = Modifier.size(15.dp)
+                                                )
                                             }
                                         }
                                         Spacer(modifier = Modifier.height(2.dp))
@@ -637,33 +652,6 @@ fun SettingsDialog(
                             }
                         }
 
-                        // Info banner
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f),
-                            modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Translate,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Text(
-                                    text = "Select a language to translate text while reading. Source language is auto-detected and translation is cached per sentence for better reliability. Requires internet.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                                    fontSize = 11.sp,
-                                    lineHeight = 15.sp
-                                )
-                            }
-                        }
-
                         OutlinedTextField(
                             value = translationSearchQuery,
                             onValueChange = { translationSearchQuery = it },
@@ -688,11 +676,14 @@ fun SettingsDialog(
                         LazyColumn(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(max = 350.dp),
+                                .heightIn(max = 380.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             items(filteredTranslationLanguages) { (langCode, langName) ->
                                 val isSelected = translationTargetLang == langCode
+                                val isDownloaded = remember(langCode) {
+                                    com.iefan.readout.tts.ReadoutTtsEngine.instance?.isLanguageDownloaded(langCode) == true
+                                }
                                 
                                 Row(
                                     modifier = Modifier
@@ -712,13 +703,26 @@ fun SettingsDialog(
                                         .padding(14.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text(
-                                        text = langName,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                                        modifier = Modifier.weight(1f)
-                                    )
+                                    Row(
+                                        modifier = Modifier.weight(1f),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = langName,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                        )
+                                        if (langCode != "none" && isDownloaded) {
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Icon(
+                                                imageVector = Icons.Default.DownloadDone,
+                                                contentDescription = "Voice Pack Downloaded",
+                                                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
+                                                modifier = Modifier.size(15.dp)
+                                            )
+                                        }
+                                    }
                                     
                                     if (isSelected) {
                                         Icon(
@@ -727,32 +731,6 @@ fun SettingsDialog(
                                             tint = MaterialTheme.colorScheme.primary,
                                             modifier = Modifier.size(20.dp)
                                         )
-                                    } else if (langCode != "none") {
-                                        Surface(
-                                            shape = RoundedCornerShape(8.dp),
-                                            color = Color(0xFF0288D1).copy(alpha = 0.15f),
-                                            modifier = Modifier.padding(vertical = 2.dp)
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Cloud,
-                                                    contentDescription = null,
-                                                    tint = Color(0xFF0288D1),
-                                                    modifier = Modifier.size(10.dp)
-                                                )
-                                                Spacer(modifier = Modifier.width(4.dp))
-                                                Text(
-                                                    text = "Online",
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    fontSize = 9.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = Color(0xFF0288D1)
-                                                )
-                                            }
-                                        }
                                     }
                                 }
                             }

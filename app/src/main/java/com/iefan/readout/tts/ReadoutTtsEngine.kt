@@ -202,6 +202,9 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
 
     fun setSelectedVoiceId(id: String) {
         _selectedVoiceId.value = id
+        if (id != "default" && id.isNotEmpty()) {
+            downloadVoiceIfNeeded(id)
+        }
         val targetLang = _translationTargetLang.value
         if (targetLang.isEmpty() || targetLang == "none") {
             configureVoiceForTier(_selectedModelTier.value)
@@ -216,9 +219,56 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
     fun setTranslationTargetLang(langCode: String) {
         _translationTargetLang.value = langCode
         _translatedSentences.value = emptyMap()
+        if (langCode.isNotEmpty() && langCode != "none") {
+            downloadLanguagePackIfNeeded(Locale.forLanguageTag(langCode))
+        }
         configureVoiceForLanguage(langCode)
         if (_isPlaying.value) {
             restartPlaybackFromCurrentSentence()
+        }
+    }
+
+    fun isLanguageDownloaded(langCode: String): Boolean {
+        val currentTts = tts ?: return false
+        if (langCode.isEmpty() || langCode == "none") return true
+        val locale = Locale.forLanguageTag(langCode)
+        return try {
+            val res = currentTts.isLanguageAvailable(locale)
+            res >= TextToSpeech.LANG_AVAILABLE
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun downloadVoiceIfNeeded(voiceId: String) {
+        val currentTts = tts ?: return
+        try {
+            val voice = currentTts.voices?.firstOrNull { it.name == voiceId }
+            if (voice != null && voice.features != null &&
+                voice.features.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED)
+            ) {
+                val intent = Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+            }
+        } catch (e: Exception) {
+            Log.e("ReadoutTtsEngine", "Failed to trigger voice download for $voiceId", e)
+        }
+    }
+
+    fun downloadLanguagePackIfNeeded(locale: Locale) {
+        val currentTts = tts ?: return
+        try {
+            val res = currentTts.isLanguageAvailable(locale)
+            if (res == TextToSpeech.LANG_MISSING_DATA) {
+                val intent = Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+            }
+        } catch (e: Exception) {
+            Log.e("ReadoutTtsEngine", "Failed to trigger language download for $locale", e)
         }
     }
 
@@ -884,27 +934,25 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
         if (parts.size <= 1) return voiceName
 
         val persona = parts[1].substringBefore("-").lowercase()
-        val isNetwork = voiceName.endsWith("network", ignoreCase = true)
-        val typeSuffix = if (isNetwork) "Neural" else "Offline"
         return when (persona) {
-            "sfg" -> "Serena · Dynamic Narrator ($typeSuffix)"
-            "iol", "lol" -> "Ava · Warm & Conversational ($typeSuffix)"
-            "iom", "lom" -> "James · Deep & Resonant ($typeSuffix)"
-            "tpf" -> "Oliver · Expressive Narrator ($typeSuffix)"
-            "tpd" -> "Lucas · Balanced Narrator ($typeSuffix)"
-            "tpc" -> "Grace · Soft Narrator ($typeSuffix)"
-            "iog" -> "Sophia · Clear Narrator ($typeSuffix)"
-            "iob" -> "Ethan · Direct Narrator ($typeSuffix)"
-            "msm" -> "Benjamin · Smooth Narrator ($typeSuffix)"
-            "rjs" -> "Arthur · British Storyteller ($typeSuffix)"
-            "gba" -> "Emma · British Narrator ($typeSuffix)"
-            "gbb" -> "George · British Narrator ($typeSuffix)"
-            "cfl" -> "Aarav · Indian English ($typeSuffix)"
-            "hie" -> "Kavya · Natural Hindi ($typeSuffix)"
-            "hid" -> "Rohan · Deep Hindi ($typeSuffix)"
-            "hia" -> "Ananya · Clear Hindi ($typeSuffix)"
-            "hic" -> "Kabir · Warm Hindi ($typeSuffix)"
-            else -> "${persona.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.ROOT) else it.toString() }} · Narrator ($typeSuffix)"
+            "sfg" -> "Serena · Dynamic Narrator"
+            "iol", "lol" -> "Ava · Warm & Conversational"
+            "iom", "lom" -> "James · Deep & Resonant"
+            "tpf" -> "Oliver · Expressive Narrator"
+            "tpd" -> "Lucas · Balanced Narrator"
+            "tpc" -> "Grace · Soft Narrator"
+            "iog" -> "Sophia · Clear Narrator"
+            "iob" -> "Ethan · Direct Narrator"
+            "msm" -> "Benjamin · Smooth Narrator"
+            "rjs" -> "Arthur · British Storyteller"
+            "gba" -> "Emma · British Narrator"
+            "gbb" -> "George · British Narrator"
+            "cfl" -> "Aarav · Indian English"
+            "hie" -> "Kavya · Natural Hindi"
+            "hid" -> "Rohan · Deep Hindi"
+            "hia" -> "Ananya · Clear Hindi"
+            "hic" -> "Kabir · Warm Hindi"
+            else -> "${persona.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.ROOT) else it.toString() }} · Narrator"
         }
     }
 
