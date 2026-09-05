@@ -158,6 +158,9 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
     private val _selectedVoiceId = MutableStateFlow("default")
     val selectedVoiceId = _selectedVoiceId.asStateFlow()
 
+    private val _previewingVoiceId = MutableStateFlow<String?>(null)
+    val previewingVoiceId = _previewingVoiceId.asStateFlow()
+
     private val _availableVoices = MutableStateFlow<List<VoiceInfo>>(emptyList())
     val availableVoices = _availableVoices.asStateFlow()
 
@@ -259,6 +262,10 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
     private fun setupProgressListener() {
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {
+                if (utteranceId?.startsWith("preview:") == true) {
+                    _previewingVoiceId.value = utteranceId.substringAfter("preview:")
+                    return
+                }
                 wordHighlightJob?.cancel()
                 val playbackState = parseUtteranceId(utteranceId) ?: return
                 if (playbackState.token != activePlaybackToken) return
@@ -271,6 +278,10 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
             }
 
             override fun onDone(utteranceId: String?) {
+                if (utteranceId?.startsWith("preview:") == true) {
+                    _previewingVoiceId.value = null
+                    return
+                }
                 val playbackState = parseUtteranceId(utteranceId) ?: return
                 if (playbackState.token != activePlaybackToken) return
 
@@ -296,6 +307,10 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
+                if (utteranceId?.startsWith("preview:") == true) {
+                    _previewingVoiceId.value = null
+                    return
+                }
                 Log.e("ReadoutTtsEngine", "TTS error on sentence $utteranceId")
                 val playbackState = parseUtteranceId(utteranceId) ?: return
                 if (playbackState.token != activePlaybackToken) return
@@ -313,6 +328,7 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
             }
 
             override fun onRangeStart(utteranceId: String?, start: Int, end: Int, frame: Int) {
+                if (utteranceId?.startsWith("preview:") == true) return
                 val playbackState = parseUtteranceId(utteranceId) ?: return
                 if (playbackState.token != activePlaybackToken) return
 
@@ -889,6 +905,100 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
             "hia" -> "Ananya · Clear Hindi ($typeSuffix)"
             "hic" -> "Kabir · Warm Hindi ($typeSuffix)"
             else -> "${persona.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.ROOT) else it.toString() }} · Narrator ($typeSuffix)"
+        }
+    }
+
+    fun previewVoice(voiceId: String, displayName: String = "", locale: Locale = Locale.US) {
+        val currentTts = tts ?: return
+
+        // If audio is actively playing a document, pause playback
+        if (_isPlaying.value) {
+            pausePlayback()
+        } else {
+            invalidatePlaybackState(stopAudio = true)
+        }
+
+        val available = try {
+            currentTts.voices
+        } catch (_: Exception) {
+            null
+        } ?: emptySet()
+
+        val targetVoice = if (voiceId != "default" && voiceId.isNotEmpty()) {
+            available.firstOrNull { it.name == voiceId }
+        } else {
+            available.filter { isLanguageMatch(it.locale, locale) }
+                .maxByOrNull { scoreVoice(it, locale, isNetworkAvailable()) }
+        }
+
+        val effectiveLocale = targetVoice?.locale ?: locale
+        if (targetVoice != null) {
+            currentTts.setLanguage(targetVoice.locale)
+            currentTts.voice = targetVoice
+        } else {
+            currentTts.setLanguage(effectiveLocale)
+        }
+
+        val personaName = getPersonaNameForAudition(displayName, targetVoice?.name ?: voiceId)
+        val sampleText = getAuditionGreeting(personaName, effectiveLocale)
+
+        _previewingVoiceId.value = voiceId
+        val utteranceId = "preview:$voiceId"
+        val params = android.os.Bundle().apply {
+            putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
+        }
+        currentTts.speak(sampleText, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
+    }
+
+    private fun getPersonaNameForAudition(displayName: String, voiceName: String): String {
+        val firstToken = displayName.split("·", "-", " ").firstOrNull()?.trim()
+        if (!firstToken.isNullOrBlank() && firstToken.length > 1 &&
+            !firstToken.equals("system", ignoreCase = true) &&
+            !firstToken.equals("default", ignoreCase = true) &&
+            !firstToken.equals("recommended", ignoreCase = true)
+        ) {
+            return firstToken
+        }
+        val parts = voiceName.split("-x-")
+        if (parts.size > 1) {
+            val persona = parts[1].substringBefore("-").lowercase()
+            return when (persona) {
+                "sfg" -> "Serena"
+                "iol", "lol" -> "Ava"
+                "iom", "lom" -> "James"
+                "tpf" -> "Oliver"
+                "tpd" -> "Lucas"
+                "tpc" -> "Grace"
+                "iog" -> "Sophia"
+                "iob" -> "Ethan"
+                "msm" -> "Benjamin"
+                "rjs" -> "Arthur"
+                "gba" -> "Emma"
+                "gbb" -> "George"
+                "cfl" -> "Aarav"
+                "hie" -> "Kavya"
+                "hid" -> "Rohan"
+                "hia" -> "Ananya"
+                "hic" -> "Kabir"
+                else -> persona.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.ROOT) else it.toString() }
+            }
+        }
+        return "Ava"
+    }
+
+    private fun getAuditionGreeting(personaName: String, locale: Locale): String {
+        return when (locale.language.lowercase()) {
+            "es" -> "Hola, mi nombre es $personaName. Soy tu narrador de lectura."
+            "fr" -> "Bonjour, je m'appelle $personaName. Je suis votre narrateur de lecture."
+            "de" -> "Hallo, mein Name ist $personaName. Ich bin dein Vorleser."
+            "hi" -> "नमस्ते, मेरा नाम $personaName है। मैं आपका वाचक हूँ।"
+            "it" -> "Ciao, mi chiamo $personaName. Sono il tuo narratore."
+            "pt" -> "Olá, meu nome é $personaName. Sou seu narrador de leitura."
+            "ru" -> "Здравствуйте, меня зовут $personaName. Я ваш чтец."
+            "ja" -> "こんにちは、$personaName です。あなたの朗読ナレーターです。"
+            "ko" -> "안녕하세요, $personaName 입니다. 책 읽어주는 내레이터입니다."
+            "zh" -> "你好，我是 $personaName，你的朗读播音员。"
+            else -> "Hi, my name is $personaName. I am your reading narrator."
         }
     }
 

@@ -1284,51 +1284,32 @@ fun DeviceScannerSheet(
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
-                                        text = "Import ${selectedDocuments.size} Documents to Library",
+                                        text = "Review & Import ${selectedDocuments.size} Documents",
                                         fontSize = 14.sp,
                                         fontWeight = FontWeight.Bold
                                     )
                                 }
                             } else if (selectedDocuments.size == 1) {
                                 val singleDoc = selectedDocuments.first()
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                Button(
+                                    onClick = {
+                                        haptic()
+                                        onDismiss()
+                                        onSelectDocument(singleDoc.uri, singleDoc.name)
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(48.dp),
+                                    shape = RoundedCornerShape(14.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                                 ) {
-                                    OutlinedButton(
-                                        onClick = {
-                                            haptic()
-                                            onDismiss()
-                                            onSelectDocument(singleDoc.uri, singleDoc.name)
-                                        },
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(48.dp),
-                                        shape = RoundedCornerShape(14.dp),
-                                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
-                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
-                                    ) {
-                                        Text("Customize & Add", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                                    }
-
-                                    Button(
-                                        onClick = {
-                                            haptic()
-                                            onDismiss()
-                                            if (onImportMultipleDocuments != null) {
-                                                onImportMultipleDocuments(listOf(singleDoc))
-                                            } else {
-                                                onSelectDocument(singleDoc.uri, singleDoc.name)
-                                            }
-                                        },
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(48.dp),
-                                        shape = RoundedCornerShape(14.dp),
-                                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                                    ) {
-                                        Text("Add to Library", fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                                    }
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Review & Add to Library", fontSize = 14.sp, fontWeight = FontWeight.Bold)
                                 }
                             } else {
                                 Row(

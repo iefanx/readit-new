@@ -209,6 +209,7 @@ fun MainLibraryView(
     val hapticTrigger = rememberHapticTrigger()
     var showAddDialog by remember { mutableStateOf(false) }
     var showDeviceScanner by remember { mutableStateOf(false) }
+    var initialScannedDrafts by remember { mutableStateOf<List<SelectedDocumentDraft>>(emptyList()) }
     var activeInputType by remember { mutableStateOf(AddInputType.PASTE) }
     var collectionTargetDoc by remember { mutableStateOf<Document?>(null) }
     var renameTargetCollection by remember { mutableStateOf<CollectionEntity?>(null) }
@@ -761,8 +762,14 @@ fun MainLibraryView(
                 initialType = activeInputType,
                 selectedUri = selectedFileUri,
                 selectedFileName = selectedFileName,
+                initialDrafts = initialScannedDrafts,
                 allCollections = allCollections,
-                onDismiss = { showAddDialog = false },
+                onDismiss = {
+                    showAddDialog = false
+                    initialScannedDrafts = emptyList()
+                    selectedFileUri = null
+                    selectedFileName = ""
+                },
                 onOpenDeviceScanner = {
                     showAddDialog = false
                     showDeviceScanner = true
@@ -774,16 +781,20 @@ fun MainLibraryView(
                     val coverPath = saveCoverFromUri(context, customCoverUri)
                     onAddDocument(title, content, "Pasted Text", coverPath, isFavorite, collectionId)
                     showAddDialog = false
+                    initialScannedDrafts = emptyList()
                 },
                 onUrlImport = { url, title, customCoverUri, isFavorite, collectionId ->
                     onUrlImport(url, title, customCoverUri, isFavorite, collectionId)
                     showAddDialog = false
+                    initialScannedDrafts = emptyList()
                 },
                 onUriImport = { uri, title, customCoverUri, isFavorite, collectionId ->
                     onUriImport(uri, title, false, customCoverUri, isFavorite, collectionId)
                     showAddDialog = false
+                    initialScannedDrafts = emptyList()
                 },
                 onBatchImport = { drafts ->
+                    initialScannedDrafts = emptyList()
                     if (onBatchImport != null) {
                         onBatchImport(drafts)
                     } else {
@@ -810,15 +821,32 @@ fun MainLibraryView(
                 onDismiss = { showDeviceScanner = false },
                 onSelectDocument = { uri, name ->
                     showDeviceScanner = false
-                    selectedFileUri = uri
-                    selectedFileName = name
+                    val cleanName = name.substringBeforeLast(".")
+                    val spaced = cleanName.replace(Regex("[_\\-]+"), " ")
+                    val cleanTitle = spaced.split(" ")
+                        .filter { it.isNotBlank() }
+                        .joinToString(" ") { word ->
+                            word.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() }
+                        }
+                    val ext = name.substringAfterLast(".", "").uppercase()
+                    initialScannedDrafts = listOf(
+                        SelectedDocumentDraft(
+                            uri = uri,
+                            fileName = name,
+                            title = cleanTitle.ifBlank { name },
+                            format = ext.ifBlank { "DOC" },
+                            isExtractingCover = true,
+                            isExpanded = true
+                        )
+                    )
+                    selectedFileUri = null
+                    selectedFileName = ""
                     activeInputType = AddInputType.FILE
                     showAddDialog = true
                 },
                 onImportMultipleDocuments = { docs ->
                     showDeviceScanner = false
-                    if (docs.size == 1) {
-                        val doc = docs.first()
+                    val drafts = docs.map { doc ->
                         val cleanName = doc.name.substringBeforeLast(".")
                         val spaced = cleanName.replace(Regex("[_\\-]+"), " ")
                         val cleanTitle = spaced.split(" ")
@@ -826,58 +854,27 @@ fun MainLibraryView(
                             .joinToString(" ") { word ->
                                 word.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() }
                             }
-                        onUriImport(
-                            doc.uri,
-                            cleanTitle.ifBlank { null },
-                            false,
-                            null,
-                            false,
-                            null
+                        val ext = doc.extension.uppercase()
+                        SelectedDocumentDraft(
+                            uri = doc.uri,
+                            fileName = doc.name,
+                            title = cleanTitle.ifBlank { doc.name },
+                            format = ext.ifBlank { "DOC" },
+                            isExtractingCover = true,
+                            isExpanded = (docs.size == 1)
                         )
-                    } else if (onBatchImport != null) {
-                        val drafts = docs.map { doc ->
-                            val cleanName = doc.name.substringBeforeLast(".")
-                            val spaced = cleanName.replace(Regex("[_\\-]+"), " ")
-                            val cleanTitle = spaced.split(" ")
-                                .filter { it.isNotBlank() }
-                                .joinToString(" ") { word ->
-                                    word.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() }
-                                }
-                            val ext = doc.extension.uppercase()
-                            SelectedDocumentDraft(
-                                uri = doc.uri,
-                                fileName = doc.name,
-                                title = cleanTitle.ifBlank { doc.name },
-                                format = ext.ifBlank { "DOC" },
-                                isExtractingCover = false,
-                                isExpanded = false
-                            )
-                        }
-                        onBatchImport(drafts)
-                    } else {
-                        scope.launch {
-                            docs.forEach { doc ->
-                                val cleanName = doc.name.substringBeforeLast(".")
-                                val spaced = cleanName.replace(Regex("[_\\-]+"), " ")
-                                val cleanTitle = spaced.split(" ")
-                                    .filter { it.isNotBlank() }
-                                    .joinToString(" ") { word ->
-                                        word.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() }
-                                    }
-                                onUriImport(
-                                    doc.uri,
-                                    cleanTitle.ifBlank { null },
-                                    false,
-                                    null,
-                                    false,
-                                    null
-                                )
-                            }
-                        }
                     }
+                    initialScannedDrafts = drafts
+                    selectedFileUri = null
+                    selectedFileName = ""
+                    activeInputType = AddInputType.FILE
+                    showAddDialog = true
                 },
                 onBrowseAll = {
                     showDeviceScanner = false
+                    initialScannedDrafts = emptyList()
+                    selectedFileUri = null
+                    selectedFileName = ""
                     activeInputType = AddInputType.FILE
                     showAddDialog = true
                 }
@@ -2065,7 +2062,8 @@ private fun SelectedDraftItemCard(
 fun AddDocumentDialog(
     initialType: AddInputType,
     selectedUri: Uri?,
-    selectedFileName: String,
+    selectedFileName: String?,
+    initialDrafts: List<SelectedDocumentDraft> = emptyList(),
     allCollections: List<CollectionEntity> = emptyList(),
     onDismiss: () -> Unit,
     onOpenDeviceScanner: () -> Unit = {},
@@ -2080,7 +2078,7 @@ fun AddDocumentDialog(
     val currentTab = initialType
 
     // Multi-draft state for selected documents
-    var selectedDrafts by remember { mutableStateOf<List<SelectedDocumentDraft>>(emptyList()) }
+    var selectedDrafts by remember(initialDrafts) { mutableStateOf<List<SelectedDocumentDraft>>(initialDrafts) }
     var targetCoverDraftId by remember { mutableStateOf<String?>(null) }
 
     // Category creation modal state
@@ -2166,11 +2164,24 @@ fun AddDocumentDialog(
         pasteOrUrlCoverUri = uri
     }
 
-    // Initialize with selectedUri if passed from outside
-    LaunchedEffect(selectedUri, selectedFileName) {
-        if (selectedUri != null && selectedDrafts.isEmpty()) {
-            val ext = selectedFileName.substringAfterLast(".", "").uppercase()
-            val cleanName = selectedFileName.substringBeforeLast(".")
+    // Initialize with selectedUri or initialDrafts if passed from outside
+    LaunchedEffect(selectedUri, selectedFileName, initialDrafts) {
+        if (initialDrafts.isNotEmpty()) {
+            selectedDrafts = initialDrafts
+            scope.launch {
+                initialDrafts.forEach { draft ->
+                    if (draft.autoCoverBitmap == null && draft.customCoverBitmap == null) {
+                        val cover = CoverPreviewHelper.extractCoverPreview(context, draft.uri, draft.fileName)
+                        selectedDrafts = selectedDrafts.map { d ->
+                            if (d.id == draft.id) d.copy(autoCoverBitmap = cover, isExtractingCover = false) else d
+                        }
+                    }
+                }
+            }
+        } else if (selectedUri != null && selectedDrafts.isEmpty()) {
+            val fileName = selectedFileName ?: "Document"
+            val ext = fileName.substringAfterLast(".", "").uppercase()
+            val cleanName = fileName.substringBeforeLast(".")
             val spaced = cleanName.replace(Regex("[_\\-]+"), " ")
             val cleanTitle = spaced.split(" ")
                 .filter { it.isNotBlank() }
@@ -2179,15 +2190,15 @@ fun AddDocumentDialog(
                 }
             val initialDraft = SelectedDocumentDraft(
                 uri = selectedUri,
-                fileName = selectedFileName,
-                title = cleanTitle.ifBlank { selectedFileName },
+                fileName = fileName,
+                title = cleanTitle.ifBlank { fileName },
                 format = ext.ifBlank { "DOC" },
                 isExtractingCover = true,
                 isExpanded = true
             )
             selectedDrafts = listOf(initialDraft)
             scope.launch {
-                val cover = CoverPreviewHelper.extractCoverPreview(context, selectedUri, selectedFileName)
+                val cover = CoverPreviewHelper.extractCoverPreview(context, selectedUri, fileName)
                 selectedDrafts = selectedDrafts.map {
                     if (it.id == initialDraft.id) it.copy(autoCoverBitmap = cover, isExtractingCover = false) else it
                 }

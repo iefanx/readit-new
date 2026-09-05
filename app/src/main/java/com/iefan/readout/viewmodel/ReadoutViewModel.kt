@@ -136,6 +136,7 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
     val sleepTimerMinutes: StateFlow<Int>
     val sleepTimerRemainingSeconds: StateFlow<Int>
     val selectedVoiceId: StateFlow<String>
+    val previewingVoiceId: StateFlow<String?>
     val availableVoices: StateFlow<List<VoiceInfo>>
     val translationTargetLang: StateFlow<String>
     val translatedSentences: StateFlow<Map<Int, String>>
@@ -215,6 +216,7 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
         sleepTimerMinutes = ttsEngine.sleepTimerMinutes
         sleepTimerRemainingSeconds = ttsEngine.sleepTimerRemainingSeconds
         selectedVoiceId = ttsEngine.selectedVoiceId
+        previewingVoiceId = ttsEngine.previewingVoiceId
         availableVoices = ttsEngine.availableVoices
         translationTargetLang = ttsEngine.translationTargetLang
         translatedSentences = ttsEngine.translatedSentences
@@ -620,6 +622,10 @@ Here is what this app can do:
         ttsEngine.setSelectedVoiceId(id)
         val sharedPrefs = getApplication<Application>().getSharedPreferences("readout_prefs", android.content.Context.MODE_PRIVATE)
         sharedPrefs.edit().putString("selected_voice_id", id).apply()
+    }
+
+    fun previewVoice(voiceId: String, displayName: String = "", locale: java.util.Locale = java.util.Locale.US) {
+        ttsEngine.previewVoice(voiceId, displayName, locale)
     }
 
     fun setTranslationTargetLang(langCode: String) {

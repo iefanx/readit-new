@@ -35,6 +35,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.automirrored.filled.VolumeDown
 import com.iefan.readout.tts.VoiceInfo
 import com.iefan.readout.tts.VoiceStatus
 
@@ -42,8 +44,10 @@ import com.iefan.readout.tts.VoiceStatus
 fun SettingsDialog(
     initialScreen: Int = 0,
     selectedVoiceId: String,
+    previewingVoiceId: String? = null,
     availableVoices: List<VoiceInfo>,
     onSelectVoice: (String) -> Unit,
+    onPreviewVoice: (String, String, java.util.Locale) -> Unit = { _, _, _ -> },
     translationTargetLang: String,
     onSelectTranslationLang: (String) -> Unit,
     themeColor: Color,
@@ -403,6 +407,7 @@ fun SettingsDialog(
                             // 1. Smart Autoselect Option
                             item {
                                 val isAutoselect = selectedVoiceId == "default" || selectedVoiceId.isEmpty()
+                                val isPreviewing = previewingVoiceId == "default"
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -419,6 +424,7 @@ fun SettingsDialog(
                                         )
                                         .clickable {
                                             onSelectVoice("default")
+                                            onPreviewVoice("default", "Default Voice", java.util.Locale.getDefault())
                                         }
                                         .padding(14.dp),
                                     verticalAlignment = Alignment.CenterVertically
@@ -445,7 +451,21 @@ fun SettingsDialog(
                                             lineHeight = 14.sp
                                         )
                                     }
+                                    IconButton(
+                                        onClick = {
+                                            onPreviewVoice("default", "Default Voice", java.util.Locale.getDefault())
+                                        },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                                            contentDescription = "Audition Voice",
+                                            tint = if (isPreviewing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
                                     if (isAutoselect) {
+                                        Spacer(modifier = Modifier.width(4.dp))
                                         Icon(
                                             imageVector = Icons.Default.Check,
                                             contentDescription = "Selected",
@@ -459,6 +479,7 @@ fun SettingsDialog(
                             // 2. Individual Voice Persona Items
                             items(availableVoices) { voiceInfo ->
                                 val isSelected = selectedVoiceId == voiceInfo.id
+                                val isPreviewing = previewingVoiceId == voiceInfo.id
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -475,6 +496,7 @@ fun SettingsDialog(
                                         )
                                         .clickable {
                                             onSelectVoice(voiceInfo.id)
+                                            onPreviewVoice(voiceInfo.id, voiceInfo.displayName, voiceInfo.locale)
                                         }
                                         .padding(14.dp),
                                     verticalAlignment = Alignment.CenterVertically
@@ -536,7 +558,21 @@ fun SettingsDialog(
                                             fontSize = 10.sp
                                         )
                                     }
+                                    IconButton(
+                                        onClick = {
+                                            onPreviewVoice(voiceInfo.id, voiceInfo.displayName, voiceInfo.locale)
+                                        },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                                            contentDescription = "Audition Voice",
+                                            tint = if (isPreviewing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
                                     if (isSelected) {
+                                        Spacer(modifier = Modifier.width(4.dp))
                                         Icon(
                                             imageVector = Icons.Default.Check,
                                             contentDescription = "Selected",

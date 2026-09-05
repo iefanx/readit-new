@@ -77,6 +77,7 @@ class MainActivity : ComponentActivity() {
                 val sleepTimerMinutes by viewModel.sleepTimerMinutes.collectAsStateWithLifecycle()
                 val remainingSeconds by viewModel.sleepTimerRemainingSeconds.collectAsStateWithLifecycle()
                 val selectedVoiceId by viewModel.selectedVoiceId.collectAsStateWithLifecycle()
+                val previewingVoiceId by viewModel.previewingVoiceId.collectAsStateWithLifecycle()
                 val availableVoices by viewModel.availableVoices.collectAsStateWithLifecycle()
                 val translationTargetLang by viewModel.translationTargetLang.collectAsStateWithLifecycle()
                 val translatedSentences by viewModel.translatedSentences.collectAsStateWithLifecycle()
@@ -336,8 +337,10 @@ class MainActivity : ComponentActivity() {
                         SettingsDialog(
                             initialScreen = settingsInitialScreen,
                             selectedVoiceId = selectedVoiceId,
+                            previewingVoiceId = previewingVoiceId,
                             availableVoices = availableVoices,
                             onSelectVoice = { voiceId -> viewModel.setSelectedVoiceId(voiceId) },
+                            onPreviewVoice = { voiceId, name, locale -> viewModel.previewVoice(voiceId, name, locale) },
                             translationTargetLang = translationTargetLang,
                             onSelectTranslationLang = { lang -> viewModel.setTranslationTargetLang(lang) },
                             themeColor = themeColor,
