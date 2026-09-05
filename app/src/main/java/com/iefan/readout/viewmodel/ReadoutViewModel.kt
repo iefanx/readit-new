@@ -376,6 +376,8 @@ Here is what this app can do:
 
         documentSelectionJob?.cancel()
         ttsEngine.stop()
+        _activeDocument.value = document
+        _activeSentences.value = getCachedSentences(document).orEmpty()
         _isPreparingPlayback.value = true
         _isPlayerExpanded.value = true
 

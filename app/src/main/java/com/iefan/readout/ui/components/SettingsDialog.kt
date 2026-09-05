@@ -3,43 +3,41 @@ package com.iefan.readout.ui.components
 import android.content.Intent
 import android.speech.tts.TextToSpeech
 import android.util.Log
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.drag
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
-import androidx.compose.material.icons.automirrored.filled.VolumeDown
 import com.iefan.readout.tts.VoiceInfo
 import com.iefan.readout.tts.VoiceStatus
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsDialog(
     initialScreen: Int = 0,
@@ -59,6 +57,7 @@ fun SettingsDialog(
     val context = LocalContext.current
     var currentScreen by remember(initialScreen) { mutableIntStateOf(initialScreen) } // 0 = Main Settings, 1 = Voice Selection, 2 = Translation, 3 = Theme Color
     var translationSearchQuery by remember { mutableStateOf("") }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     val translationLanguages = listOf(
         Pair("none", "Original Text (No Translation)"),
@@ -99,25 +98,37 @@ fun SettingsDialog(
         translationLanguages.firstOrNull { it.first == translationTargetLang }?.second ?: "Original Text"
     }
 
-    Dialog(
+    BackHandler {
+        if (currentScreen != 0) {
+            currentScreen = 0
+        } else {
+            onDismiss()
+        }
+    }
+
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Card(
-            shape = RoundedCornerShape(28.dp),
-            modifier = Modifier
-                .fillMaxWidth(0.92f)
-                .heightIn(max = 680.dp)
-                .padding(4.dp)
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(28.dp)),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-        ) {
-            Column(
-                modifier = Modifier
-                    .padding(24.dp)
-                    .fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally
+        sheetState = sheetState,
+        containerColor = Color(0xFF101014),
+        contentColor = Color.White,
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+        dragHandle = {
+            Surface(
+                modifier = Modifier.padding(vertical = 10.dp),
+                color = Color(0xFF383842),
+                shape = RoundedCornerShape(2.dp)
             ) {
+                Box(modifier = Modifier.size(width = 38.dp, height = 4.dp))
+            }
+        }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(start = 20.dp, end = 20.dp, bottom = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
                 // Compact Modern Header
                 Row(
                     modifier = Modifier
@@ -216,41 +227,51 @@ fun SettingsDialog(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(16.dp))
-                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f))
+                                    .background(Color(0xFF181820))
                                     .border(
-                                        1.dp,
-                                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                        BorderStroke(1.dp, Color(0xFF282834)),
                                         RoundedCornerShape(16.dp)
                                     )
                                     .clickable { currentScreen = 1 }
-                                    .padding(16.dp),
+                                    .padding(horizontal = 16.dp, vertical = 14.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.RecordVoiceOver,
-                                    contentDescription = "Voice Persona",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                                Spacer(modifier = Modifier.width(16.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .size(38.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.RecordVoiceOver,
+                                        contentDescription = "Voice Persona",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(14.dp))
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         text = "Voice Persona",
                                         style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurface
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color.White
                                     )
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
                                         text = currentVoiceName,
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        color = Color(0xFF9E9EA8),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                                 Icon(
                                     imageVector = Icons.Default.ChevronRight,
                                     contentDescription = "Go to voice selection",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    tint = Color(0xFF6B6B78),
+                                    modifier = Modifier.size(20.dp)
                                 )
                             }
 
@@ -259,41 +280,51 @@ fun SettingsDialog(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(16.dp))
-                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f))
+                                    .background(Color(0xFF181820))
                                     .border(
-                                        1.dp,
-                                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                        BorderStroke(1.dp, Color(0xFF282834)),
                                         RoundedCornerShape(16.dp)
                                     )
                                     .clickable { currentScreen = 2 }
-                                    .padding(16.dp),
+                                    .padding(horizontal = 16.dp, vertical = 14.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Translate,
-                                    contentDescription = "Translation",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                                Spacer(modifier = Modifier.width(16.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .size(38.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Translate,
+                                        contentDescription = "Translation",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(14.dp))
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         text = "Translation Language",
                                         style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurface
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color.White
                                     )
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
                                         text = currentTranslationName,
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        color = Color(0xFF9E9EA8),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                                 Icon(
                                     imageVector = Icons.Default.ChevronRight,
                                     contentDescription = "Go to translation settings",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    tint = Color(0xFF6B6B78),
+                                    modifier = Modifier.size(20.dp)
                                 )
                             }
 
@@ -302,29 +333,36 @@ fun SettingsDialog(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(16.dp))
-                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f))
+                                    .background(Color(0xFF181820))
                                     .border(
-                                        1.dp,
-                                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                        BorderStroke(1.dp, Color(0xFF282834)),
                                         RoundedCornerShape(16.dp)
                                     )
                                     .clickable { currentScreen = 3 }
-                                    .padding(16.dp),
+                                    .padding(horizontal = 16.dp, vertical = 14.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Palette,
-                                    contentDescription = "Theme Color",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                                Spacer(modifier = Modifier.width(16.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .size(38.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Palette,
+                                        contentDescription = "Theme Color",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(14.dp))
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         text = "Theme Accent Color",
                                         style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurface
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color.White
                                     )
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Row(
@@ -340,90 +378,125 @@ fun SettingsDialog(
                                         Text(
                                             text = String.format("#%06X", 0xFFFFFF and themeColor.toArgb()),
                                             style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            color = Color(0xFF9E9EA8)
                                         )
                                     }
                                 }
                                 Icon(
                                     imageVector = Icons.Default.ChevronRight,
                                     contentDescription = "Go to theme color settings",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    tint = Color(0xFF6B6B78),
+                                    modifier = Modifier.size(20.dp)
                                 )
                             }
 
                             // Category: Backup & Restore
-                            Row(
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(16.dp))
-                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f))
+                                    .background(Color(0xFF181820))
                                     .border(
-                                        1.dp,
-                                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                        BorderStroke(1.dp, Color(0xFF282834)),
                                         RoundedCornerShape(16.dp)
                                     )
-                                    .padding(16.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                                    .padding(16.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Storage,
-                                    contentDescription = "Data Backup & Restore",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                                Spacer(modifier = Modifier.width(16.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = "Backup & Restore",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    Spacer(modifier = Modifier.height(2.dp))
-                                    Text(
-                                        text = "Import or export library data",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(38.dp)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Storage,
+                                            contentDescription = "Backup & Restore",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(14.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "Backup & Restore",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = Color.White
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = "Export or restore library and bookmarks",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFF9E9EA8)
+                                        )
+                                    }
                                 }
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    OutlinedButton(
+
+                                Spacer(modifier = Modifier.height(14.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Button(
                                         onClick = onImportData,
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                        shape = RoundedCornerShape(10.dp),
-                                        border = androidx.compose.foundation.BorderStroke(
-                                            1.dp,
-                                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(42.dp),
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = Color(0xFF22222C),
+                                            contentColor = Color.White
                                         ),
-                                        modifier = Modifier.height(34.dp)
+                                        border = BorderStroke(1.dp, Color(0xFF333342)),
+                                        contentPadding = PaddingValues(horizontal = 8.dp)
                                     ) {
                                         Icon(
                                             imageVector = Icons.Default.Upload,
                                             contentDescription = "Import",
                                             tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(14.dp)
+                                            modifier = Modifier.size(16.dp)
                                         )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("Import", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Import",
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = Color.White
+                                        )
                                     }
-                                    OutlinedButton(
+
+                                    Button(
                                         onClick = onExportData,
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                        shape = RoundedCornerShape(10.dp),
-                                        border = androidx.compose.foundation.BorderStroke(
-                                            1.dp,
-                                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(42.dp),
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = Color(0xFF22222C),
+                                            contentColor = Color.White
                                         ),
-                                        modifier = Modifier.height(34.dp)
+                                        border = BorderStroke(1.dp, Color(0xFF333342)),
+                                        contentPadding = PaddingValues(horizontal = 8.dp)
                                     ) {
                                         Icon(
                                             imageVector = Icons.Default.Download,
                                             contentDescription = "Export",
                                             tint = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.size(14.dp)
+                                            modifier = Modifier.size(16.dp)
                                         )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("Export", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Export",
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = Color.White
+                                        )
                                     }
                                 }
                             }
@@ -447,12 +520,12 @@ fun SettingsDialog(
                                         .clip(RoundedCornerShape(16.dp))
                                         .background(
                                             if (isAutoselect) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
-                                            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f)
+                                            else Color(0xFF181820)
                                         )
                                         .border(
                                             1.dp,
                                             if (isAutoselect) MaterialTheme.colorScheme.primary
-                                            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                            else Color(0xFF282834),
                                             RoundedCornerShape(16.dp)
                                         )
                                         .clickable {
@@ -519,12 +592,12 @@ fun SettingsDialog(
                                         .clip(RoundedCornerShape(16.dp))
                                         .background(
                                             if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
-                                            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f)
+                                            else Color(0xFF181820)
                                         )
                                         .border(
                                             1.dp,
                                             if (isSelected) MaterialTheme.colorScheme.primary
-                                            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                            else Color(0xFF282834),
                                             RoundedCornerShape(16.dp)
                                         )
                                         .clickable {
@@ -691,12 +764,12 @@ fun SettingsDialog(
                                         .clip(RoundedCornerShape(16.dp))
                                         .background(
                                             if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
-                                            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f)
+                                            else Color(0xFF181820)
                                         )
                                         .border(
                                             1.dp,
                                             if (isSelected) MaterialTheme.colorScheme.primary
-                                            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                            else Color(0xFF282834),
                                             RoundedCornerShape(16.dp)
                                         )
                                         .clickable { onSelectTranslationLang(langCode) }
@@ -865,21 +938,28 @@ fun SettingsDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                TextButton(
+                Button(
                     onClick = {
                         if (currentScreen != 0) currentScreen = 0 else onDismiss()
                     },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (currentScreen != 0) Color(0xFF22222C) else MaterialTheme.colorScheme.primary,
+                        contentColor = Color.White
+                    )
                 ) {
                     Text(
                         text = if (currentScreen != 0) "Back to Settings" else "Done",
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp
                     )
                 }
             }
         }
     }
-}
 
 private fun interpolateColorInSpectrum(colors: List<Color>, fraction: Float): Color {
     if (colors.isEmpty()) return Color.White

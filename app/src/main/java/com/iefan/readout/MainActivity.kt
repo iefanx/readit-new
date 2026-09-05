@@ -287,7 +287,9 @@ class MainActivity : ComponentActivity() {
                     } else {
                         // High-fidelity active acoustic reader
                         val doc = activeDocVal ?: run {
-                            viewModel.minimizePlayer()
+                            if (!isPreparingPlayback) {
+                                viewModel.minimizePlayer()
+                            }
                             return@Scaffold
                         }
                         ActivePlayerView(
