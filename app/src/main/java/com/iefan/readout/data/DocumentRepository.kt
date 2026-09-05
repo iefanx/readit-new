@@ -7,7 +7,32 @@ class DocumentRepository(private val documentDao: DocumentDao) {
 
     fun getDocumentByIdFlow(id: Long): Flow<Document?> = documentDao.getDocumentByIdFlow(id)
 
-    suspend fun getDocumentById(id: Long): Document? = documentDao.getDocumentById(id)
+    suspend fun getDocumentById(id: Long): Document? {
+        val length = documentDao.getDocumentContentLength(id) ?: 0L
+        if (length <= 1_500_000L) {
+            return try {
+                documentDao.getDocumentById(id)
+            } catch (_: Throwable) {
+                loadDocumentChunked(id, length)
+            }
+        }
+        return loadDocumentChunked(id, length)
+    }
+
+    private suspend fun loadDocumentChunked(id: Long, totalLength: Long): Document? {
+        val meta = documentDao.getDocumentMetadataById(id) ?: return null
+        if (totalLength <= 0L) return meta
+        val chunkSize = 800_000
+        val sb = java.lang.StringBuilder(totalLength.toInt().coerceAtLeast(0))
+        var offset = 1
+        while (offset <= totalLength) {
+            val chunk = documentDao.getDocumentContentChunk(id, offset, chunkSize) ?: ""
+            if (chunk.isEmpty()) break
+            sb.append(chunk)
+            offset += chunk.length
+        }
+        return meta.copy(content = sb.toString())
+    }
 
     suspend fun insert(document: Document): Long = documentDao.insertDocument(document)
 

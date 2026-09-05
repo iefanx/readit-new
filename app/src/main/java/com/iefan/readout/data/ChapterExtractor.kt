@@ -182,84 +182,89 @@ object ChapterExtractor {
         val candidates = mutableListOf<ChapterCandidate>()
         try {
             java.util.zip.ZipFile(epubFile).use { zip ->
-                val tocMap = mutableListOf<Pair<String, String>>() // Pair of (title, srcFileSuffix)
+                val entries = zip.entries().toList()
+                val tocItems = mutableListOf<Pair<String, String>>() // (title, href)
 
-                // 1. Try NCX outline (EPUB 2)
-                val ncxEntry = zip.entries().asSequence().find { it.name.endsWith(".ncx", ignoreCase = true) }
+                // 1. Try NCX outline (EPUB 2 standard)
+                val ncxEntry = entries.firstOrNull { it.name.lowercase().endsWith(".ncx") }
                 if (ncxEntry != null) {
-                    val xml = zip.getInputStream(ncxEntry).use { it.bufferedReader(Charsets.UTF_8).readText() }
-                    val doc = Jsoup.parse(xml, "", org.jsoup.parser.Parser.xmlParser())
-                    val navPoints = doc.select("navPoint")
-                    
-                    for (np in navPoints) {
-                        val title = np.selectFirst("navLabel > text")?.text() ?: ""
-                        val src = np.selectFirst("content")?.attr("src") ?: ""
-                        if (title.isNotEmpty() && src.isNotEmpty()) {
-                            val cleanSrc = src.substringBefore("#").substringAfterLast("/")
-                            if (cleanSrc.isNotEmpty()) {
-                                tocMap.add(Pair(title, cleanSrc))
+                    try {
+                        val xml = zip.getInputStream(ncxEntry).bufferedReader(Charsets.UTF_8).readText()
+                        val doc = Jsoup.parse(xml, "", org.jsoup.parser.Parser.xmlParser())
+                        val navPoints = doc.select("navPoint")
+                        for (np in navPoints) {
+                            val title = np.selectFirst("navLabel > text")?.text()?.trim() ?: ""
+                            val src = np.selectFirst("content")?.attr("src")?.trim() ?: ""
+                            if (title.isNotEmpty()) {
+                                tocItems.add(Pair(title, src))
                             }
                         }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
                     }
-                } else {
-                    // 2. Try EPUB 3 Navigation HTML (nav.xhtml, toc.xhtml etc.)
-                    val navEntry = zip.entries().asSequence().find { entry ->
+                }
+
+                // 2. Try EPUB 3 Navigation Document (nav.xhtml, toc.xhtml etc.) if NCX was absent or empty
+                if (tocItems.isEmpty()) {
+                    val navEntry = entries.firstOrNull { entry ->
                         val name = entry.name.lowercase()
-                        name.endsWith("nav.xhtml") || name.endsWith("nav.html") || 
-                        name.endsWith("toc.xhtml") || name.endsWith("toc.html") || 
-                        name.endsWith("navigation.xhtml") || name.endsWith("navigation.html")
+                        !entry.isDirectory && (
+                            name.endsWith("nav.xhtml") || name.endsWith("nav.html") || 
+                            name.endsWith("toc.xhtml") || name.endsWith("toc.html") || 
+                            name.endsWith("navigation.xhtml") || name.endsWith("navigation.html")
+                        )
                     }
                     if (navEntry != null) {
-                        val html = zip.getInputStream(navEntry).use { it.bufferedReader(Charsets.UTF_8).readText() }
-                        val doc = Jsoup.parse(html)
-                        val links = doc.select("a")
-                        for (link in links) {
-                            val title = link.text().trim()
-                            val src = link.attr("href")
-                            if (title.isNotEmpty() && src.isNotEmpty()) {
-                                val cleanSrc = src.substringBefore("#").substringAfterLast("/")
-                                if (cleanSrc.isNotEmpty()) {
-                                    tocMap.add(Pair(title, cleanSrc))
+                        try {
+                            val html = zip.getInputStream(navEntry).bufferedReader(Charsets.UTF_8).readText()
+                            val doc = Jsoup.parse(html)
+                            val links = doc.select("nav[epub:type=toc] a, nav#toc a, ol.toc a, a")
+                            for (link in links) {
+                                val title = link.text().trim()
+                                val src = link.attr("href").trim()
+                                if (title.isNotEmpty()) {
+                                    tocItems.add(Pair(title, src))
                                 }
                             }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
                         }
                     }
                 }
 
-                // If we found any TOC items, map them to file offsets
-                if (tocMap.isNotEmpty()) {
-                    val entries = zip.entries().toList()
-                    val textEntries = entries.filter { entry ->
-                        val name = entry.name.lowercase()
-                        !entry.isDirectory && (name.endsWith(".xhtml") || name.endsWith(".html") || name.endsWith(".htm"))
-                    }.sortedBy { it.name }
-                    
-                    var currentOffset = 0
-                    val fileStartOffsets = mutableMapOf<String, Int>()
-                    
-                    for (entry in textEntries) {
-                        val fileName = entry.name.substringAfterLast("/")
-                        fileStartOffsets[fileName] = currentOffset
-                        
-                        zip.getInputStream(entry).use { stream ->
-                            val htmlContent = stream.bufferedReader(Charsets.UTF_8).readText()
-                            val docHtml = Jsoup.parse(htmlContent)
-                            docHtml.select("script, style, head, header, footer, nav, iframe, noscript").remove()
-                            val blocks = docHtml.select("p, h1, h2, h3, h4, h5, h6, li, blockquote, pre")
-                            val contentBuilder = StringBuilder()
-                            for (b in blocks) {
-                                contentBuilder.append(b.text().trim()).append("\n\n")
+                // Match TOC chapter titles against the extracted text
+                if (tocItems.isNotEmpty() && extractedText.isNotBlank()) {
+                    var lastOffset = 0
+                    for ((title, _) in tocItems) {
+                        // Look for the title in the extracted text at or after the previous chapter offset
+                        val searchTitle = title.trim()
+                        if (searchTitle.length < 2) continue
+
+                        // Try exact match or line match
+                        val lineRegex = Pattern.compile(
+                            """(?m)^\s*""" + Pattern.quote(searchTitle) + """\s*$""",
+                            Pattern.CASE_INSENSITIVE
+                        )
+                        val matcher = lineRegex.matcher(extractedText)
+                        var foundOffset = -1
+                        while (matcher.find()) {
+                            if (matcher.start() >= lastOffset) {
+                                foundOffset = matcher.start()
+                                break
                             }
-                            currentOffset += contentBuilder.toString().length + 2
                         }
-                    }
-                    
-                    for (item in tocMap) {
-                        val title = item.first
-                        val srcFile = item.second
-                        val offset = fileStartOffsets[srcFile]
-                        if (offset != null) {
-                            candidates.add(ChapterCandidate(title, offset))
+
+                        // Fallback: substring search at or after lastOffset
+                        if (foundOffset == -1) {
+                            val idx = extractedText.indexOf(searchTitle, lastOffset)
+                            if (idx != -1) {
+                                foundOffset = idx
+                            }
+                        }
+
+                        if (foundOffset != -1) {
+                            candidates.add(ChapterCandidate(searchTitle, foundOffset))
+                            lastOffset = foundOffset
                         }
                     }
                 }
@@ -269,10 +274,11 @@ object ChapterExtractor {
         }
 
         val sortedCandidates = candidates.distinctBy { it.charOffset }.sortedBy { it.charOffset }
-        if (sortedCandidates.isNotEmpty()) {
+        if (sortedCandidates.size >= 2) {
             return sortedCandidates
         }
 
+        // Fallback to text sniffer if TOC produced no matches
         return extractChaptersFromText(extractedText)
     }
 
@@ -299,12 +305,12 @@ object ChapterExtractor {
                 flatten(bookmarks as List<Map<String, Any>>)
 
                 for (bookmark in flatBookmarks) {
-                    val title = bookmark["Title"] as? String
+                    val title = (bookmark["Title"] as? String)?.trim() ?: ""
                     val pageInfo = bookmark["Page"] as? String
-                    if (title != null && pageInfo != null) {
+                    if (title.isNotEmpty() && pageInfo != null) {
                         val pageNum = pageInfo.split(" ").firstOrNull()?.toIntOrNull()
                         if (pageNum != null && pageNum > 0 && pageNum < pageStartOffsets.size) {
-                            val offset = pageStartOffsets[pageNum]
+                            val offset = pageStartOffsets[pageNum].coerceIn(0, extractedText.length)
                             candidates.add(ChapterCandidate(title, offset))
                         }
                     }
@@ -317,7 +323,7 @@ object ChapterExtractor {
         }
 
         val sortedCandidates = candidates.distinctBy { it.charOffset }.sortedBy { it.charOffset }
-        if (sortedCandidates.isNotEmpty()) {
+        if (sortedCandidates.size >= 2) {
             return sortedCandidates
         }
 

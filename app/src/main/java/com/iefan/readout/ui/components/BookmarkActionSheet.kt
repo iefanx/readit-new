@@ -1,7 +1,9 @@
 package com.iefan.readout.ui.components
 
 import androidx.compose.animation.Crossfade
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -79,16 +81,16 @@ fun BookmarkActionSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color(0xFF141416),
+        containerColor = Color(0xFF101012),
         tonalElevation = 0.dp,
         dragHandle = {
             Box(
                 modifier = Modifier
-                    .padding(top = 14.dp, bottom = 6.dp)
+                    .padding(top = 12.dp, bottom = 6.dp)
                     .width(36.dp)
                     .height(4.dp)
                     .clip(RoundedCornerShape(2.dp))
-                    .background(Color(0xFF3A3A3C))
+                    .background(Color(0xFF38383C))
             )
         }
     ) {
@@ -139,20 +141,31 @@ fun BookmarkActionSheet(
             }
 
             // ── Sentence preview ─────────────────────────────────────────────
-            Box(
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFF1C1C1E))
-                    .padding(horizontal = 14.dp, vertical = 12.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xFF161619))
+                    .border(1.dp, Color(0xFF24242A), RoundedCornerShape(14.dp))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                Box(
+                    modifier = Modifier
+                        .width(3.dp)
+                        .height(36.dp)
+                        .clip(RoundedCornerShape(1.5.dp))
+                        .background(MaterialTheme.colorScheme.primary)
+                )
                 Text(
                     text = sentenceText.trim(),
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF8E8E93),
+                    color = Color(0xFFB0B0B8),
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
-                    lineHeight = 18.sp
+                    lineHeight = 18.sp,
+                    modifier = Modifier.weight(1f)
                 )
             }
 
@@ -166,7 +179,7 @@ fun BookmarkActionSheet(
                 placeholder = {
                     Text(
                         text = "Bookmark name…",
-                        color = Color(0xFF48484A)
+                        color = Color(0xFF636366)
                     )
                 },
                 singleLine = true,
@@ -179,10 +192,10 @@ fun BookmarkActionSheet(
                     focusedTextColor = Color.White,
                     unfocusedTextColor = Color.White,
                     focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = Color(0xFF2C2C2E),
+                    unfocusedBorderColor = Color(0xFF24242A),
                     cursorColor = MaterialTheme.colorScheme.primary,
-                    focusedContainerColor = Color(0xFF1C1C1E),
-                    unfocusedContainerColor = Color(0xFF1C1C1E)
+                    focusedContainerColor = Color(0xFF161619),
+                    unfocusedContainerColor = Color(0xFF161619)
                 ),
                 shape = RoundedCornerShape(14.dp)
             )
@@ -197,10 +210,15 @@ fun BookmarkActionSheet(
                         keyboardController?.hide()
                         onDismiss()
                     },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp),
                     shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF8E8E93)),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF2C2C2E))
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = Color(0xFF161619),
+                        contentColor = Color(0xFF9E9EA8)
+                    ),
+                    border = BorderStroke(1.dp, Color(0xFF24242A))
                 ) {
                     Text("Cancel", fontWeight = FontWeight.Medium)
                 }
@@ -208,7 +226,9 @@ fun BookmarkActionSheet(
                 Button(
                     onClick = ::save,
                     enabled = label.isNotBlank() && !saved,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp),
                     shape = RoundedCornerShape(14.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary,

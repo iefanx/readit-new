@@ -2,6 +2,9 @@ package com.iefan.readout.ui.screens
 
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -12,6 +15,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -36,7 +40,6 @@ import com.iefan.readout.data.Chapter
 import com.iefan.readout.data.Bookmark
 import com.iefan.readout.tts.SpeechSentence
 import com.iefan.readout.ui.components.KaraokeView
-import com.iefan.readout.ui.components.SoundWaveVisualizer
 import com.iefan.readout.ui.components.styleOfCaption
 import com.iefan.readout.utils.rememberHapticTrigger
 import com.iefan.readout.ui.components.styleOfSubtitle
@@ -77,8 +80,12 @@ fun ActivePlayerView(
     onAddBookmark: (sentenceIndex: Int, charOffset: Int, label: String) -> Unit,
     onRemoveBookmark: (Bookmark) -> Unit,
     isTranslating: Boolean,
+    translationTargetLang: String = "none",
+    translatedSentences: Map<Int, String> = emptyMap(),
     isPreparingPlayback: Boolean,
     onSeekToFraction: (Float) -> Unit = {},
+    onOpenSettings: () -> Unit = {},
+    onOpenTranslation: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val hapticTrigger = rememberHapticTrigger()
@@ -178,117 +185,206 @@ fun ActivePlayerView(
         )
     }
 
-    Scaffold(
-        topBar = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color.Black)
-                    .padding(bottom = 8.dp)
-            ) {
-                // Line 1: Nav Bar Row (Back button, title, and TOC/Chapters button)
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(56.dp)
-                ) {
-                    IconButton(
-                        onClick = {
-                            hapticTrigger()
-                            onBack()
-                        },
-                        modifier = Modifier
-                            .align(Alignment.CenterStart)
-                            .testTag("player_back_btn")
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Return to Library",
-                            tint = Color.White
-                        )
-                    }
-
-                    Text(
-                        text = document.title,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp,
-                        color = Color.White,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .fillMaxWidth(0.68f),
-                        textAlign = TextAlign.Center
-                    )
-
-                    // TOC button — always visible (shows chapters tab if available,
-                    // otherwise defaults to bookmarks tab)
-                    IconButton(
-                        onClick = {
-                            hapticTrigger()
-                            showTocSheet = true
-                        },
-                        modifier = Modifier.align(Alignment.CenterEnd)
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Toc,
-                            contentDescription = "Table of Contents",
-                            tint = Color.White
-                        )
-                    }
-                }
-
-                // Line 2: Wide progress bar with remaining duration
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    SeekableProgressBar(
-                        progress = progressFraction,
-                        onSeek = onSeekToFraction,
-                        modifier = Modifier.weight(1f)
-                    )
-
-                    Spacer(modifier = Modifier.width(12.dp))
-
-                    Text(
-                        text = timeRemainingStr,
-                        fontSize = 11.sp,
-                        color = Color.LightGray,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-            }
-        },
+    Box(
         modifier = modifier
-    ) { innerPadding ->
-        Box(
-            modifier = Modifier
-                .padding(innerPadding)
-                .fillMaxSize()
-                .background(Color.Black)
-        ) {
-            // Upper viewport: Karaoke follow reader viewport (takes full height in background)
-            KaraokeView(
-                sentences = sentences,
-                activeSentenceIndex = currentSentenceIndex,
-                currentWordRange = currentWordRange,
-                isPlaying = isPlaying,
-                isTranslating = isTranslating,
-                onSentenceJump = { idx ->
-                    onSeekToSentence(idx)
-                    if (!isPlaying) {
-                        onTogglePlayback()
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(
+                                    Color.Black,
+                                    Color.Black.copy(alpha = 0.90f),
+                                    Color.Transparent
+                                )
+                            )
+                        )
+                        .statusBarsPadding()
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                ) {
+                    // Line 1: Nav Bar Row (Back button, title, TOC button, Settings button)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(42.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = {
+                                hapticTrigger()
+                                onBack()
+                            },
+                            modifier = Modifier
+                                .size(38.dp)
+                                .testTag("player_back_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Return to Library",
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
+                        Text(
+                            text = document.title,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 15.sp,
+                            color = Color.White,
+                            maxLines = 1,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(horizontal = 6.dp)
+                                .basicMarquee(
+                                    iterations = Int.MAX_VALUE,
+                                    repeatDelayMillis = 1500,
+                                    velocity = 30.dp
+                                ),
+                            textAlign = TextAlign.Center
+                        )
+
+                        // Translate button (Quick language translation)
+                        IconButton(
+                            onClick = {
+                                hapticTrigger()
+                                onOpenTranslation()
+                            },
+                            modifier = Modifier.size(38.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Translate,
+                                contentDescription = "Translate",
+                                tint = if (isTranslating) MaterialTheme.colorScheme.primary else Color.White,
+                                modifier = Modifier.size(19.dp)
+                            )
+                        }
+
+                        // TOC button (Chapters + Bookmarks)
+                        IconButton(
+                            onClick = {
+                                hapticTrigger()
+                                showTocSheet = true
+                            },
+                            modifier = Modifier.size(38.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Toc,
+                                contentDescription = "Table of Contents",
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
+                        // Settings button (Voice persona, translation, themes, backup)
+                        IconButton(
+                            onClick = {
+                                hapticTrigger()
+                                onOpenSettings()
+                            },
+                            modifier = Modifier.size(38.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Settings,
+                                contentDescription = "Settings",
+                                tint = Color.White,
+                                modifier = Modifier.size(19.dp)
+                            )
+                        }
                     }
-                },
-                onLongPressBookmark = { idx, text ->
-                    val charOffset = if (idx in sentences.indices) sentences[idx].start else 0
-                    pendingBookmark = PendingBookmark(idx, charOffset, text)
-                },
-                modifier = Modifier.fillMaxSize()
-            )
+
+                    // Line 2: Sleek compact progress bar with remaining duration
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 0.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        SeekableProgressBar(
+                            progress = progressFraction,
+                            onSeek = onSeekToFraction,
+                            modifier = Modifier.weight(1f)
+                        )
+
+                        Spacer(modifier = Modifier.width(10.dp))
+
+                        Text(
+                            text = timeRemainingStr,
+                            fontSize = 11.sp,
+                            color = Color(0xFFAAAAAA),
+                            fontWeight = FontWeight.Medium
+                        )
+
+                        if (isTranslating && translationTargetLang.isNotEmpty() && translationTargetLang != "none") {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                                border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)),
+                                onClick = {
+                                    hapticTrigger()
+                                    onOpenTranslation()
+                                }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Translate,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(11.dp)
+                                    )
+                                    Text(
+                                        text = translationTargetLang.uppercase(),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxSize()
+        ) { innerPadding ->
+            Box(
+                modifier = Modifier
+                    .padding(innerPadding)
+                    .fillMaxSize()
+                    .background(Color.Transparent)
+            ) {
+                // Upper viewport: Karaoke follow reader viewport (takes full height in background)
+                key(document.id) {
+                    KaraokeView(
+                        sentences = sentences,
+                        activeSentenceIndex = currentSentenceIndex,
+                        currentWordRange = currentWordRange,
+                        isPlaying = isPlaying,
+                        isTranslating = isTranslating,
+                        translatedSentences = translatedSentences,
+                        onSentenceJump = { idx ->
+                            onSeekToSentence(idx)
+                            if (!isPlaying) {
+                                onTogglePlayback()
+                            }
+                        },
+                        onLongPressBookmark = { idx, text ->
+                            val charOffset = if (idx in sentences.indices) sentences[idx].start else 0
+                            pendingBookmark = PendingBookmark(idx, charOffset, text)
+                        },
+                        showResyncButton = activeOverlay == ActiveOverlay.NONE,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
 
             if (isPreparingPlayback && sentences.isEmpty()) {
                 Box(
@@ -320,6 +416,7 @@ fun ActivePlayerView(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
+                    .navigationBarsPadding()
                     .padding(bottom = 16.dp),
                 contentAlignment = Alignment.Center
             ) {
@@ -331,53 +428,55 @@ fun ActivePlayerView(
                     label = "player_drawer_anim",
                     modifier = Modifier.padding(horizontal = 24.dp)
                 ) { overlay ->
-                    when (overlay) {
+                        when (overlay) {
 
-                        ActiveOverlay.SLEEP_TIMER -> {
-                            SleepTimerPanel(
-                                sleepMinutes = sleepTimerMinutes,
-                                sleepSecondsRemaining = sleepTimerRemainingSeconds,
-                                onSleepChange = onSleepTimerChanged,
-                                onClose = { activeOverlay = ActiveOverlay.NONE },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(24.dp))
-                                    .border(1.dp, Color(0xFF242426), RoundedCornerShape(24.dp))
-                            )
-                        }
-                        ActiveOverlay.SPEED_ONLY -> {
-                            SpeedOnlyPanel(
-                                speed = playbackSpeed,
-                                onSpeedChange = onSpeedChanged,
-                                onClose = { activeOverlay = ActiveOverlay.NONE },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(24.dp))
-                                    .border(1.dp, Color(0xFF242426), RoundedCornerShape(24.dp))
-                            )
-                        }
-                        ActiveOverlay.NONE -> {
-                            FloatingCapsulePlayer(
-                                progressFraction = progressFraction,
-                                isPlaying = isPlaying,
-                                playbackSpeed = playbackSpeed,
-                                sleepTimerMinutes = sleepTimerMinutes,
-                                sleepTimerRemainingSeconds = sleepTimerRemainingSeconds,
-                                onTogglePlayback = onTogglePlayback,
-                                onSkipForward = onSkipForward,
-                                onSkipBackward = onSkipBackward,
-                                onSelectSleepTimer = { activeOverlay = ActiveOverlay.SLEEP_TIMER },
-                                onSelectSpeedOnly = { activeOverlay = ActiveOverlay.SPEED_ONLY },
-                                modifier = Modifier
-                                    .width(330.dp)
-                                    .height(72.dp)
-                            )
+                            ActiveOverlay.SLEEP_TIMER -> {
+                                SleepTimerPanel(
+                                    sleepMinutes = sleepTimerMinutes,
+                                    sleepSecondsRemaining = sleepTimerRemainingSeconds,
+                                    onSleepChange = onSleepTimerChanged,
+                                    onClose = { activeOverlay = ActiveOverlay.NONE },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(24.dp))
+                                        .border(1.dp, Color(0xFF242426), RoundedCornerShape(24.dp))
+                                )
+                            }
+                            ActiveOverlay.SPEED_ONLY -> {
+                                SpeedOnlyPanel(
+                                    speed = playbackSpeed,
+                                    onSpeedChange = onSpeedChanged,
+                                    onClose = { activeOverlay = ActiveOverlay.NONE },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(24.dp))
+                                        .border(1.dp, Color(0xFF242426), RoundedCornerShape(24.dp))
+                                )
+                            }
+                            ActiveOverlay.NONE -> {
+                                FloatingCapsulePlayer(
+                                    progressFraction = progressFraction,
+                                    isPlaying = isPlaying,
+                                    playbackSpeed = playbackSpeed,
+                                    sleepTimerMinutes = sleepTimerMinutes,
+                                    sleepTimerRemainingSeconds = sleepTimerRemainingSeconds,
+                                    onTogglePlayback = onTogglePlayback,
+                                    onSkipForward = onSkipForward,
+                                    onSkipBackward = onSkipBackward,
+                                    onSelectSleepTimer = { activeOverlay = ActiveOverlay.SLEEP_TIMER },
+                                    onSelectSpeedOnly = { activeOverlay = ActiveOverlay.SPEED_ONLY },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .widthIn(max = 400.dp)
+                                        .height(72.dp)
+                                )
+                            }
                         }
                     }
-                }
             }
         }
     }
+}
 }
 
 @Composable
@@ -397,49 +496,43 @@ private fun SeekableProgressBar(
     Canvas(
         modifier = modifier
             .fillMaxWidth()
-            .height(48.dp)
+            .height(22.dp)
             .pointerInput(Unit) {
-                var isDragging = false
+                detectTapGestures(
+                    onTap = { offset ->
+                        val fraction = (offset.x / size.width.toFloat()).coerceIn(0f, 1f)
+                        onSeek(fraction)
+                    }
+                )
+            }
+            .pointerInput(Unit) {
                 detectDragGestures(
                     onDragStart = { startPosition ->
-                        val progressX = currentActualProgress * size.width
-                        // Check if touch is within 24.dp of the thumb circle
-                        val distance = Math.abs(startPosition.x - progressX)
-                        if (distance <= 24.dp.toPx()) {
-                            isDragging = true
-                            dragProgress = currentActualProgress
-                            view.parent?.requestDisallowInterceptTouchEvent(true)
-                        }
+                        val fraction = (startPosition.x / size.width.toFloat()).coerceIn(0f, 1f)
+                        dragProgress = fraction
+                        view.parent?.requestDisallowInterceptTouchEvent(true)
                     },
                     onDragEnd = {
-                        if (isDragging) {
-                            dragProgress?.let { onSeek(it) }
-                            dragProgress = null
-                            isDragging = false
-                        }
+                        dragProgress?.let { onSeek(it) }
+                        dragProgress = null
                         view.parent?.requestDisallowInterceptTouchEvent(false)
                     },
                     onDragCancel = {
-                        if (isDragging) {
-                            dragProgress = null
-                            isDragging = false
-                        }
+                        dragProgress = null
                         view.parent?.requestDisallowInterceptTouchEvent(false)
                     },
                     onDrag = { change, _ ->
-                        if (isDragging) {
-                            change.consume()
-                            val fraction = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
-                            dragProgress = fraction
-                        }
+                        change.consume()
+                        val fraction = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                        dragProgress = fraction
                     }
                 )
             }
     ) {
         val h = size.height
         val centerY = h / 2
-        val strokeWidthVal = 4.dp.toPx()
-        val thumbRadius = 6.dp.toPx()
+        val strokeWidthVal = 3.dp.toPx()
+        val thumbRadius = 5.dp.toPx()
 
         // Draw track
         drawLine(
@@ -462,7 +555,14 @@ private fun SeekableProgressBar(
             )
         }
 
-        // Draw thumb circle
+        // Draw thumb glow and circle
+        if (progressX > 0f) {
+            drawCircle(
+                color = primaryColor.copy(alpha = 0.32f),
+                radius = thumbRadius * 2.2f,
+                center = Offset(progressX, centerY)
+            )
+        }
         drawCircle(
             color = primaryColor,
             radius = thumbRadius,
@@ -486,13 +586,27 @@ fun FloatingCapsulePlayer(
     modifier: Modifier = Modifier
 ) {
     val hapticTrigger = rememberHapticTrigger()
+    val playButtonScale by animateFloatAsState(
+        targetValue = if (isPlaying) 1.0f else 0.96f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow),
+        label = "play_scale"
+    )
+
     Box(modifier = modifier) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .clip(RoundedCornerShape(36.dp))
-                .background(Color(0xD9141416))
-                .border(1.dp, Color(0x99242426), RoundedCornerShape(36.dp))
+                .background(Color(0xE6141418))
+                .border(
+                    BorderStroke(
+                        1.dp,
+                        Brush.verticalGradient(
+                            listOf(Color.White.copy(alpha = 0.22f), Color.White.copy(alpha = 0.04f))
+                        )
+                    ),
+                    RoundedCornerShape(36.dp)
+                )
         ) {
             Row(
                 modifier = Modifier
@@ -501,12 +615,17 @@ fun FloatingCapsulePlayer(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                // Dynamic Sleep Timer Icon Selection (Glowing Active State or normal sleep clock)
+                // Dynamic Sleep Timer Pill
                 Box(
                     modifier = Modifier
                         .size(42.dp)
                         .clip(RoundedCornerShape(21.dp))
-                        .background(if (sleepTimerMinutes > 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.85f) else Color(0xCC1F1F22))
+                        .background(if (sleepTimerMinutes > 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.90f) else Color(0xCC1F1F24))
+                        .border(
+                            1.dp,
+                            if (sleepTimerMinutes > 0) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.08f),
+                            RoundedCornerShape(21.dp)
+                        )
                         .clickable { onSelectSleepTimer() },
                     contentAlignment = Alignment.Center
                 ) {
@@ -523,7 +642,7 @@ fun FloatingCapsulePlayer(
                         Icon(
                             imageVector = Icons.Default.AccessTime,
                             contentDescription = "Sleep Timer",
-                            tint = Color.White.copy(alpha = 0.85f),
+                            tint = Color.White.copy(alpha = 0.90f),
                             modifier = Modifier.size(18.dp)
                         )
                     }
@@ -540,30 +659,51 @@ fun FloatingCapsulePlayer(
                     Icon(
                         imageVector = Icons.Default.FastRewind,
                         contentDescription = "Rewind",
-                        tint = Color.White.copy(alpha = 0.85f),
+                        tint = Color.White.copy(alpha = 0.92f),
                         modifier = Modifier.size(24.dp)
                     )
                 }
 
-                // Central Play/Pause Capsule
+                // Central Play/Pause Capsule with ambient halo glow
                 Box(
                     modifier = Modifier
-                        .size(54.dp)
-                        .clip(RoundedCornerShape(27.dp))
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.85f))
-                        .clickable {
-                            hapticTrigger()
-                            onTogglePlayback()
-                        }
-                        .testTag("play_pause_toggle_btn"),
+                        .size(56.dp)
+                        .graphicsLayer {
+                            scaleX = playButtonScale
+                            scaleY = playButtonScale
+                        },
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                        contentDescription = if (isPlaying) "Pause" else "Play",
-                        tint = Color.White,
-                        modifier = Modifier.size(28.dp)
+                    // Radiant halo glow
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(CircleShape)
+                            .background(
+                                Brush.radialGradient(
+                                    listOf(MaterialTheme.colorScheme.primary.copy(alpha = 0.40f), Color.Transparent)
+                                )
+                            )
                     )
+                    Box(
+                        modifier = Modifier
+                            .size(50.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary)
+                            .clickable {
+                                hapticTrigger()
+                                onTogglePlayback()
+                            }
+                            .testTag("play_pause_toggle_btn"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = if (isPlaying) "Pause" else "Play",
+                            tint = Color.White,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    }
                 }
 
                 // Forward 10s Button
@@ -577,18 +717,19 @@ fun FloatingCapsulePlayer(
                     Icon(
                         imageVector = Icons.Default.FastForward,
                         contentDescription = "Forward",
-                        tint = Color.White.copy(alpha = 0.85f),
+                        tint = Color.White.copy(alpha = 0.92f),
                         modifier = Modifier.size(24.dp)
                     )
                 }
 
-                // Speed Trigger Button Shows context overlay
+                // Speed Trigger Button
                 Box(
                     modifier = Modifier
                         .width(52.dp)
                         .height(42.dp)
                         .clip(RoundedCornerShape(21.dp))
-                        .background(Color(0xCC1F1F22))
+                        .background(Color(0xCC1F1F24))
+                        .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(21.dp))
                         .clickable {
                             hapticTrigger()
                             onSelectSpeedOnly()
@@ -599,7 +740,7 @@ fun FloatingCapsulePlayer(
                         text = String.format(java.util.Locale.US, "%.1fx", playbackSpeed),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color.White.copy(alpha = 0.85f)
+                        color = Color.White.copy(alpha = 0.90f)
                     )
                 }
             }

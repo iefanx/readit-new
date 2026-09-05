@@ -2,6 +2,7 @@ package com.iefan.readout.ui.screens
 
 import android.graphics.BitmapFactory
 import android.net.Uri
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -18,16 +19,30 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.iefan.readout.viewmodel.ImportTaskProgress
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -54,8 +69,102 @@ import com.iefan.readout.data.CollectionEntity
 import com.iefan.readout.data.DocumentCollectionCrossRef
 import com.iefan.readout.ui.components.styleOfCaption
 import com.iefan.readout.utils.CoverCache
+import com.iefan.readout.utils.CoverPreviewHelper
+import com.iefan.readout.utils.DeviceScannerSheet
 import com.iefan.readout.utils.rememberHapticTrigger
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.ui.text.input.ImeAction
+import kotlinx.coroutines.delay
 import com.iefan.readout.ui.components.styleOfSubtitle
+
+enum class DocumentFormatType(val label: String, val badgeText: String) {
+    BOOK("Book", "BOOK"),
+    DOCUMENT("Document", "DOC"),
+    TEXT("Text", "TEXT"),
+    WEB_ARTICLE("Web Article", "WEB")
+}
+
+data class DocumentClassification(
+    val formatType: DocumentFormatType,
+    val displayLabel: String,
+    val badgeText: String,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val detailText: String
+)
+
+fun getDocumentClassification(document: Document): DocumentClassification {
+    val sUrl = document.sourceUrl?.trim()
+    val titleLower = document.title.lowercase()
+
+    // 1. Web Link check
+    val isLink = sUrl?.startsWith("http://", ignoreCase = true) == true ||
+            sUrl?.startsWith("https://", ignoreCase = true) == true ||
+            sUrl?.startsWith("www.", ignoreCase = true) == true
+    if (isLink) {
+        val hostLabel = try {
+            val uriHost = java.net.URI(sUrl).host
+            uriHost?.removePrefix("www.")?.ifBlank { null }
+        } catch (_: Exception) {
+            null
+        }
+        return DocumentClassification(
+            formatType = DocumentFormatType.WEB_ARTICLE,
+            displayLabel = "Web Article",
+            badgeText = "WEB",
+            icon = Icons.Default.Link,
+            detailText = hostLabel ?: "Web Article"
+        )
+    }
+
+    // 2. Pasted Text check
+    val isPasted = sUrl.isNullOrEmpty() ||
+            sUrl.equals("Pasted Text", ignoreCase = true) ||
+            sUrl.equals("Shared Text", ignoreCase = true) ||
+            titleLower.contains("pasted text") ||
+            titleLower.contains("paste")
+    if (isPasted) {
+        return DocumentClassification(
+            formatType = DocumentFormatType.TEXT,
+            displayLabel = "Text",
+            badgeText = "TEXT",
+            icon = Icons.Default.ContentPaste,
+            detailText = "Text"
+        )
+    }
+
+    // 3. EPUB Book check
+    val isEpub = sUrl.endsWith(".epub", ignoreCase = true) ||
+            sUrl.equals("Homer", ignoreCase = true) ||
+            titleLower.endsWith(".epub") ||
+            titleLower.contains("the odyssey") ||
+            document.coverPath?.contains("epub", ignoreCase = true) == true
+    if (isEpub) {
+        return DocumentClassification(
+            formatType = DocumentFormatType.BOOK,
+            displayLabel = "Book",
+            badgeText = "BOOK",
+            icon = Icons.AutoMirrored.Filled.MenuBook,
+            detailText = "Book"
+        )
+    }
+
+    // 4. File Document check (PDF, DOCX, TXT, HTML, etc.)
+    val isPdf = sUrl.endsWith(".pdf", ignoreCase = true) ||
+            titleLower.endsWith(".pdf") ||
+            document.coverPath?.contains("pdf", ignoreCase = true) == true
+    val badge = if (isPdf) "PDF" else "DOC"
+    val icon = if (isPdf) Icons.Default.PictureAsPdf else Icons.Default.Description
+    return DocumentClassification(
+        formatType = DocumentFormatType.DOCUMENT,
+        displayLabel = "Document",
+        badgeText = badge,
+        icon = icon,
+        detailText = "Document"
+    )
+}
 
 enum class AddInputType {
     FILE,
@@ -72,18 +181,20 @@ fun MainLibraryView(
     onSelectDocument: (Document) -> Unit,
     onDeleteDocument: (Document) -> Unit,
     onEditDocument: (Long, String, Uri?, Boolean) -> Unit = { _, _, _, _ -> },
-    onAddDocument: (String, String, String?, String?) -> Unit,
+    onAddDocument: (String, String, String?, String?, Boolean, Long?) -> Unit = { _, _, _, _, _, _ -> },
     onOpenSettings: () -> Unit,
     onOpenLibrary: () -> Unit,
     onToggleFavorite: (Document) -> Unit,
     onAddDocumentToCollection: (Long, Long) -> Unit,
     onRemoveDocumentFromCollection: (Long, Long) -> Unit,
-    onCreateCollection: (String, Long?) -> Unit,
+    onCreateCollection: (String, Long?, ((Long) -> Unit)?) -> Unit = { _, _, _ -> },
     onDeleteCollection: (CollectionEntity) -> Unit,
     onRenameCollection: (CollectionEntity, String) -> Unit,
     isImporting: Boolean = false,
-    onUrlImport: (String, String?) -> Unit = { _, _ -> },
-    onUriImport: (Uri, String?, Boolean) -> Unit = { _, _, _ -> },
+    importProgress: ImportTaskProgress = ImportTaskProgress(),
+    onBatchImport: ((List<SelectedDocumentDraft>) -> Unit)? = null,
+    onUrlImport: (String, String?, Uri?, Boolean, Long?) -> Unit = { _, _, _, _, _ -> },
+    onUriImport: (Uri, String?, Boolean, Uri?, Boolean, Long?) -> Unit = { _, _, _, _, _, _ -> },
     activeDocument: Document? = null,
     isPlaying: Boolean = false,
     progressFraction: Float = 0f,
@@ -97,6 +208,7 @@ fun MainLibraryView(
 ) {
     val hapticTrigger = rememberHapticTrigger()
     var showAddDialog by remember { mutableStateOf(false) }
+    var showDeviceScanner by remember { mutableStateOf(false) }
     var activeInputType by remember { mutableStateOf(AddInputType.PASTE) }
     var collectionTargetDoc by remember { mutableStateOf<Document?>(null) }
     var renameTargetCollection by remember { mutableStateOf<CollectionEntity?>(null) }
@@ -104,6 +216,16 @@ fun MainLibraryView(
     var collectionToDelete by remember { mutableStateOf<CollectionEntity?>(null) }
     var documentToEdit by remember { mutableStateOf<Document?>(null) }
     var activeOptionsDoc by remember { mutableStateOf<Document?>(null) }
+
+    val recentReadsListState = rememberLazyListState()
+    var previousDocCount by remember { mutableIntStateOf(allDocuments.size) }
+
+    LaunchedEffect(allDocuments.size) {
+        if (allDocuments.size > previousDocCount) {
+            recentReadsListState.animateScrollToItem(0)
+        }
+        previousDocCount = allDocuments.size
+    }
 
     val selectDocCallback = remember(onSelectDocument) {
         { doc: Document ->
@@ -178,7 +300,7 @@ fun MainLibraryView(
                             }
                         }
                         val cleanTitle = displayName.substringBeforeLast(".")
-                        onUriImport(uri, cleanTitle, false)
+                        onUriImport(uri, cleanTitle, false, null, false, null)
                     }
                 }
             }
@@ -201,15 +323,14 @@ fun MainLibraryView(
                             painter = painterResource(id = R.drawable.ic_logo),
                             contentDescription = "Readout Logo",
                             tint = Color.White,
-                            modifier = Modifier
-                                .size(22.dp)
-                                .padding(end = 8.dp)
+                            modifier = Modifier.size(34.dp)
                         )
+                        Spacer(modifier = Modifier.width(10.dp))
                         Text(
                             text = "Readout",
                             fontWeight = FontWeight.ExtraBold,
-                            fontSize = 20.sp,
-                            letterSpacing = 0.5.sp,
+                            fontSize = 21.sp,
+                            letterSpacing = 0.3.sp,
                             color = Color.White
                         )
                     }
@@ -220,7 +341,7 @@ fun MainLibraryView(
                         onOpenLibrary()
                     }) {
                         Icon(
-                            imageVector = Icons.Default.LibraryBooks,
+                            imageVector = Icons.AutoMirrored.Filled.LibraryBooks,
                             contentDescription = "Library",
                             tint = Color.White
                         )
@@ -254,7 +375,7 @@ fun MainLibraryView(
                     .fillMaxSize()
                     .padding(horizontal = 12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(28.dp)
+                verticalArrangement = Arrangement.spacedBy(22.dp)
             ) {
                 item {
                     Spacer(modifier = Modifier.height(10.dp))
@@ -262,15 +383,18 @@ fun MainLibraryView(
                     // Unified Action buttons side by side
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        // File Action Card (triggers Activity file picker)
+                        // File Action Card (opens Add Document modal with File tab selected)
                         ActionCard(
                             title = "File",
-                            icon = Icons.Default.NoteAdd,
+                            icon = Icons.Default.Description,
                             onClick = { 
                                 hapticTrigger()
-                                fileLauncher.launch("*/*")
+                                selectedFileUri = null
+                                selectedFileName = ""
+                                activeInputType = AddInputType.FILE
+                                showAddDialog = true 
                             },
                             modifier = Modifier.weight(1f)
                         )
@@ -302,53 +426,119 @@ fun MainLibraryView(
                 }
 
                 item {
-                    // Heading 2: Continue Reading
+                    // Heading 2: Continue Reading with clean Library navigation
                     Column(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = "Continue Reading",
-                            fontSize = 22.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Continue Reading",
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = (-0.2).sp,
+                                color = Color.White
+                            )
+
+                            // Minimalist Library navigation link
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        hapticTrigger()
+                                        onOpenLibrary()
+                                    }
+                                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "Library",
+                                    fontSize = 13.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                    contentDescription = "Open Library",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                            }
+                        }
                         
-                        Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
 
                         if (allDocuments.isEmpty()) {
-                            // Empty State card
+                            // Editorial Empty State card
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(16.dp))
-                                    .background(Color(0xFF111113))
-                                    .padding(vertical = 40.dp, horizontal = 24.dp),
+                                    .clip(RoundedCornerShape(20.dp))
+                                    .background(
+                                        Brush.verticalGradient(
+                                            listOf(
+                                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.16f),
+                                                Color(0xFF131316)
+                                            )
+                                        )
+                                    )
+                                    .border(
+                                        androidx.compose.foundation.BorderStroke(
+                                            1.dp,
+                                            Brush.verticalGradient(
+                                                listOf(
+                                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.30f),
+                                                    Color.White.copy(alpha = 0.05f)
+                                                )
+                                            )
+                                        ),
+                                        RoundedCornerShape(20.dp)
+                                    )
+                                    .padding(vertical = 36.dp, horizontal = 24.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Icon(
-                                        imageVector = Icons.Default.MenuBook,
-                                        contentDescription = "Empty",
-                                        tint = Color.DarkGray,
-                                        modifier = Modifier.size(48.dp)
-                                    )
-                                    Spacer(modifier = Modifier.height(12.dp))
-                                    Text(
-                                        text = "Your library is clean & empty",
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = Color.Gray
-                                    )
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(54.dp)
+                                            .clip(CircleShape)
+                                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.AutoStories,
+                                            contentDescription = "Empty Library",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(28.dp)
+                                        )
+                                    }
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(
-                                        text = "Load an article preset or paste text above to start",
-                                        fontSize = 11.sp,
-                                        color = Color.DarkGray
+                                        text = "Your Stories Await",
+                                        fontSize = 17.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        text = "Import a PDF, EPUB, web link, or paste text to experience natural AI audio narration.",
+                                        fontSize = 13.sp,
+                                        color = Color.White.copy(alpha = 0.60f),
+                                        textAlign = TextAlign.Center,
+                                        lineHeight = 18.sp,
+                                        modifier = Modifier.fillMaxWidth(0.88f)
                                     )
                                 }
                             }
                         } else {
                             // Scrollable Row of Documents styled beautifully as Cover sheets
                             LazyRow(
-                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                state = recentReadsListState,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .testTag("recent_reads_row")
@@ -371,16 +561,16 @@ fun MainLibraryView(
                         Column(modifier = Modifier.fillMaxWidth()) {
                             Text(
                                 text = "Favorites",
-                                fontSize = 22.sp,
+                                fontSize = 18.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = Color.White
                             )
                             
-                            Spacer(modifier = Modifier.height(16.dp))
+                            Spacer(modifier = Modifier.height(10.dp))
 
                             // Scrollable Row of Documents styled beautifully as Cover sheets
                             LazyRow(
-                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 items(favoriteDocs, key = { it.id }) { doc ->
@@ -466,7 +656,7 @@ fun MainLibraryView(
                             ) {
                                 Text(
                                     text = col.name,
-                                    fontSize = 22.sp,
+                                    fontSize = 18.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = Color.White
                                 )
@@ -525,10 +715,10 @@ fun MainLibraryView(
                                 }
                             }
                             
-                            Spacer(modifier = Modifier.height(16.dp))
+                            Spacer(modifier = Modifier.height(10.dp))
 
                             LazyRow(
-                                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 items(colDocs, key = { it.id }) { doc ->
@@ -558,8 +748,9 @@ fun MainLibraryView(
                     onClose = onCloseMiniPlayer,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(bottom = 16.dp)
-                        .width(330.dp)
+                        .padding(horizontal = 20.dp, vertical = 16.dp)
+                        .fillMaxWidth()
+                        .widthIn(max = 420.dp)
                         .height(72.dp)
                 )
             }
@@ -570,59 +761,132 @@ fun MainLibraryView(
                 initialType = activeInputType,
                 selectedUri = selectedFileUri,
                 selectedFileName = selectedFileName,
+                allCollections = allCollections,
                 onDismiss = { showAddDialog = false },
-                onAdd = { title, content, url ->
-                    onAddDocument(title, content, url, null)
+                onOpenDeviceScanner = {
+                    showAddDialog = false
+                    showDeviceScanner = true
+                },
+                onCreateCollection = { name, callback ->
+                    onCreateCollection(name, null, callback)
+                },
+                onAdd = { title, content, customCoverUri, isFavorite, collectionId ->
+                    val coverPath = saveCoverFromUri(context, customCoverUri)
+                    onAddDocument(title, content, "Pasted Text", coverPath, isFavorite, collectionId)
                     showAddDialog = false
                 },
-                onUrlImport = { url, title ->
-                    onUrlImport(url, title)
+                onUrlImport = { url, title, customCoverUri, isFavorite, collectionId ->
+                    onUrlImport(url, title, customCoverUri, isFavorite, collectionId)
                     showAddDialog = false
                 },
-                onUriImport = { uri, title ->
-                    onUriImport(uri, title, true)
+                onUriImport = { uri, title, customCoverUri, isFavorite, collectionId ->
+                    onUriImport(uri, title, false, customCoverUri, isFavorite, collectionId)
+                    showAddDialog = false
+                },
+                onBatchImport = { drafts ->
+                    if (onBatchImport != null) {
+                        onBatchImport(drafts)
+                    } else {
+                        scope.launch {
+                            drafts.forEach { draft ->
+                                onUriImport(
+                                    draft.uri,
+                                    draft.title.ifBlank { null },
+                                    false,
+                                    draft.customCoverUri,
+                                    draft.isFavorite,
+                                    draft.collectionId
+                                )
+                            }
+                        }
+                    }
                     showAddDialog = false
                 }
             )
         }
 
-        // Beautiful full-screen loader when background parsing is in progress
-        if (isImporting) {
-            AlertDialog(
-                onDismissRequest = {},
-                confirmButton = {},
-                title = {},
-                text = {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 24.dp)
-                    ) {
-                        CircularProgressIndicator(
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(56.dp)
+        if (showDeviceScanner) {
+            DeviceScannerSheet(
+                onDismiss = { showDeviceScanner = false },
+                onSelectDocument = { uri, name ->
+                    showDeviceScanner = false
+                    selectedFileUri = uri
+                    selectedFileName = name
+                    activeInputType = AddInputType.FILE
+                    showAddDialog = true
+                },
+                onImportMultipleDocuments = { docs ->
+                    showDeviceScanner = false
+                    if (docs.size == 1) {
+                        val doc = docs.first()
+                        val cleanName = doc.name.substringBeforeLast(".")
+                        val spaced = cleanName.replace(Regex("[_\\-]+"), " ")
+                        val cleanTitle = spaced.split(" ")
+                            .filter { it.isNotBlank() }
+                            .joinToString(" ") { word ->
+                                word.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() }
+                            }
+                        onUriImport(
+                            doc.uri,
+                            cleanTitle.ifBlank { null },
+                            false,
+                            null,
+                            false,
+                            null
                         )
-                        Spacer(modifier = Modifier.height(24.dp))
-                        Text(
-                            text = "Ingesting & Analyzing Content...",
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Extracting clean text structure and loading high-fidelity vocal preview...",
-                            fontSize = 12.sp,
-                            color = Color.Gray,
-                            textAlign = TextAlign.Center
-                        )
+                    } else if (onBatchImport != null) {
+                        val drafts = docs.map { doc ->
+                            val cleanName = doc.name.substringBeforeLast(".")
+                            val spaced = cleanName.replace(Regex("[_\\-]+"), " ")
+                            val cleanTitle = spaced.split(" ")
+                                .filter { it.isNotBlank() }
+                                .joinToString(" ") { word ->
+                                    word.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() }
+                                }
+                            val ext = doc.extension.uppercase()
+                            SelectedDocumentDraft(
+                                uri = doc.uri,
+                                fileName = doc.name,
+                                title = cleanTitle.ifBlank { doc.name },
+                                format = ext.ifBlank { "DOC" },
+                                isExtractingCover = false,
+                                isExpanded = false
+                            )
+                        }
+                        onBatchImport(drafts)
+                    } else {
+                        scope.launch {
+                            docs.forEach { doc ->
+                                val cleanName = doc.name.substringBeforeLast(".")
+                                val spaced = cleanName.replace(Regex("[_\\-]+"), " ")
+                                val cleanTitle = spaced.split(" ")
+                                    .filter { it.isNotBlank() }
+                                    .joinToString(" ") { word ->
+                                        word.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() }
+                                    }
+                                onUriImport(
+                                    doc.uri,
+                                    cleanTitle.ifBlank { null },
+                                    false,
+                                    null,
+                                    false,
+                                    null
+                                )
+                            }
+                        }
                     }
                 },
-                containerColor = Color(0xFF141416),
-                shape = RoundedCornerShape(24.dp)
+                onBrowseAll = {
+                    showDeviceScanner = false
+                    activeInputType = AddInputType.FILE
+                    showAddDialog = true
+                }
             )
+        }
+
+        // Granular, transparent progress dialog tracking extraction, speech analysis, and saving
+        if (importProgress.isImporting) {
+            ImportProgressDialog(progress = importProgress)
         }
 
         collectionTargetDoc?.let { doc ->
@@ -633,7 +897,7 @@ fun MainLibraryView(
                 onDismiss = { collectionTargetDoc = null },
                 onAddRelation = { colId -> onAddDocumentToCollection(doc.id, colId) },
                 onRemoveRelation = { colId -> onRemoveDocumentFromCollection(doc.id, colId) },
-                onCreateCollection = { name -> onCreateCollection(name, doc.id) },
+                onCreateCollection = { name -> onCreateCollection(name, doc.id, null) },
                 onDeleteCollection = onDeleteCollection
             )
         }
@@ -783,45 +1047,54 @@ fun ActionCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Card(
-        modifier = modifier
-            .height(72.dp)
-            .clickable { onClick() },
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = Color(0xFF141416)
-        ),
-        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF242426))
+    Surface(
+        onClick = onClick,
+        modifier = modifier.height(52.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = Color(0xFF141417),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF24242A))
     ) {
-        Column(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = title,
-                tint = Color.White,
-                modifier = Modifier.size(20.dp)
-            )
-            Spacer(modifier = Modifier.height(6.dp))
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(15.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = title,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
+                fontSize = 13.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White,
+                maxLines = 1
             )
         }
     }
 }
 
-// Shared gradient palette — defined once at file level, never re-allocated
+// Shared gradient palette — rich, editorial tones for generated covers
 private val COVER_GRADIENTS = listOf(
-    listOf(Color(0xFF1E3A8A), Color(0xFF0F172A)), // Sapphire Navy
-    listOf(Color(0xFF0F1E36), Color(0xFF1E293B)), // Slate Steel
-    listOf(Color(0xFF1E1B4B), Color(0xFF312E81)), // Twilight Midnight
-    listOf(Color(0xFF0F2027), Color(0xFF2C5364)), // Deep Ocean Teal
-    listOf(Color(0xFF022C22), Color(0xFF064E3B))  // Hunter Emerald
+    listOf(Color(0xFF1E3A8A), Color(0xFF0F172A)), // Midnight Sapphire
+    listOf(Color(0xFF064E3B), Color(0xFF022C22)), // Nordic Emerald
+    listOf(Color(0xFF4C1D95), Color(0xFF1E1B4B)), // Royal Obsidian
+    listOf(Color(0xFF164E63), Color(0xFF083344)), // Deep Ocean Teal
+    listOf(Color(0xFF701A75), Color(0xFF2E1065)), // Wine Amethyst
+    listOf(Color(0xFF1C1917), Color(0xFF0C0A09))  // Titanium Slate
 )
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -830,16 +1103,11 @@ fun DocumentCard(
     document: Document,
     onSelect: (Document) -> Unit,
     onLongSelect: (Document) -> Unit,
-    cardWidth: Dp = 135.dp,
-    cardHeight: Dp = 175.dp
+    cardWidth: Dp = 116.dp,
+    cardHeight: Dp = 156.dp
 ) {
-    // Derived flags — remembered to avoid recomputation on every recomposition
-    val isPastedText = remember(document.id, document.sourceUrl, document.title) {
-        document.sourceUrl.isNullOrEmpty() || document.title.lowercase().contains("paste")
-    }
-    val isLink = remember(document.id, document.sourceUrl) {
-        document.sourceUrl?.startsWith("http", ignoreCase = true) == true ||
-        document.sourceUrl?.startsWith("www.", ignoreCase = true) == true
+    val classification = remember(document.id, document.sourceUrl, document.title, document.coverPath) {
+        getDocumentClassification(document)
     }
     val percentage = remember(document.id, document.playbackPosition, document.contentLength) {
         if (document.contentLength > 0)
@@ -849,17 +1117,18 @@ fun DocumentCard(
     val coverGradient = remember(document.title) {
         COVER_GRADIENTS[Math.abs(document.title.hashCode()) % COVER_GRADIENTS.size]
     }
-    val iconVector = remember(isPastedText, isLink) {
+    val iconVector = classification.icon
+
+    // Subtitle label: progress, reading time / word count, or clean document classification
+    val subtitleText = remember(percentage, document.contentLength, classification) {
         when {
-            isPastedText -> Icons.Default.ContentPaste
-            isLink -> Icons.Default.Link
-            else -> Icons.Default.MenuBook
+            percentage >= 0.98f -> "Completed"
+            percentage > 0.01f -> "${(percentage * 100).toInt()}% completed"
+            else -> classification.displayLabel
         }
     }
 
     // Load cover bitmap from coverPath asynchronously, utilizing CoverCache.
-    // Decode at thumbnail size (max 512px) using inSampleSize to avoid loading multi-MB images
-    // for tiny 135dp cards — this is the #1 cause of GC-induced scroll jitter.
     val cachedBitmap = remember(document.coverPath) {
         document.coverPath?.let { path ->
             if (CoverCache.isFailed(path)) null else CoverCache.get(path)
@@ -877,19 +1146,16 @@ fun DocumentCard(
                 } else {
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                         try {
-                            // First pass: read dimensions only (no pixel allocation)
                             val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                             BitmapFactory.decodeFile(path, opts)
-                            // Compute power-of-two downsample so the image fits in ~512px
                             val maxDim = 512
                             var sample = 1
                             while (opts.outWidth / (sample * 2) >= maxDim && opts.outHeight / (sample * 2) >= maxDim) {
                                 sample *= 2
                             }
-                            // Second pass: decode at reduced resolution
                             val decodeOpts = BitmapFactory.Options().apply {
                                 inSampleSize = sample
-                                inPreferredConfig = android.graphics.Bitmap.Config.RGB_565 // 2 bytes/px instead of 4
+                                inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
                             }
                             val bitmap = BitmapFactory.decodeFile(path, decodeOpts)?.asImageBitmap()
                             if (bitmap != null) CoverCache.put(path, bitmap)
@@ -905,6 +1171,8 @@ fun DocumentCard(
         }
     }
 
+    val isCompact = cardWidth < 110.dp
+
     Column(
         modifier = Modifier
             .width(cardWidth)
@@ -915,7 +1183,9 @@ fun DocumentCard(
             modifier = Modifier
                 .width(cardWidth)
                 .height(cardHeight)
-                .clip(RoundedCornerShape(14.dp))
+                .shadow(elevation = 6.dp, shape = RoundedCornerShape(13.dp), clip = false)
+                .clip(RoundedCornerShape(13.dp))
+                .border(1.dp, Color(0xFF26262C), RoundedCornerShape(13.dp))
                 .combinedClickable(
                     onClick = { onSelect(document) },
                     onLongClick = { onLongSelect(document) }
@@ -931,65 +1201,863 @@ fun DocumentCard(
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
+                // Editorial typography for generated cover
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(Brush.verticalGradient(coverGradient))
-                        .padding(14.dp)
+                        .padding(horizontal = 12.dp, vertical = 12.dp)
                 ) {
                     Column(
                         modifier = Modifier.fillMaxSize(),
                         verticalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text(
-                            text = document.title,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Serif,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color.White.copy(alpha = 0.95f),
-                            lineHeight = 16.sp,
-                            maxLines = 4,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(top = 8.dp)
-                        )
-                        Icon(
-                            imageVector = iconVector,
-                            contentDescription = "Type",
-                            tint = Color.White.copy(alpha = 0.5f),
-                            modifier = Modifier.size(18.dp)
-                        )
+                        // Top format badge + micro icon
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = classification.badgeText,
+                                fontSize = if (isCompact) 8.sp else 8.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp,
+                                color = Color.White.copy(alpha = 0.50f)
+                            )
+                            Icon(
+                                imageVector = iconVector,
+                                contentDescription = null,
+                                tint = Color.White.copy(alpha = 0.45f),
+                                modifier = Modifier.size(13.dp)
+                            )
+                        }
+
+                        // Bottom section: accent bar and serif title
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(20.dp)
+                                    .height(2.dp)
+                                    .clip(RoundedCornerShape(1.dp))
+                                    .background(Color.White.copy(alpha = 0.40f))
+                            )
+                            Text(
+                                text = document.title,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Serif,
+                                fontSize = if (isCompact) 10.5.sp else 11.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color.White.copy(alpha = 0.95f),
+                                lineHeight = if (isCompact) 13.5.sp else 15.sp,
+                                maxLines = if (isCompact) 3 else 4,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 }
             }
 
-            // Visual Progress Strip at the bottom of the cover
+            // Hardcover Book Spine crease highlight along left edge
             Box(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
+                    .width(4.dp)
+                    .fillMaxHeight()
+                    .align(Alignment.CenterStart)
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(
+                                Color.White.copy(alpha = 0.20f),
+                                Color.White.copy(alpha = 0.04f),
+                                Color.Black.copy(alpha = 0.35f)
+                            )
+                        )
+                    )
+            )
+
+            // Subtle top edge highlight
+            Box(
+                modifier = Modifier
                     .fillMaxWidth()
-                    .height(4.dp)
-                    .background(Color.DarkGray.copy(alpha = 0.3f))
-            ) {
+                    .height(1.dp)
+                    .align(Alignment.TopCenter)
+                    .background(Color.White.copy(alpha = 0.10f))
+            )
+
+            // Visual Progress Strip at the bottom of the cover
+            if (percentage > 0f) {
                 Box(
                     modifier = Modifier
-                        .fillMaxHeight()
-                        .fillMaxWidth(percentage)
-                        .background(MaterialTheme.colorScheme.primary)
-                )
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .height(3.dp)
+                        .background(Color.Black.copy(alpha = 0.65f))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(percentage)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                }
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(6.dp))
 
         Text(
             text = document.title,
             maxLines = 2,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
+            fontSize = if (isCompact) 11.5.sp else 12.5.sp,
+            fontWeight = FontWeight.SemiBold,
             color = Color.White,
             overflow = TextOverflow.Ellipsis,
-            lineHeight = 16.sp
+            lineHeight = if (isCompact) 14.5.sp else 15.5.sp
         )
+
+        Spacer(modifier = Modifier.height(2.dp))
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            if (percentage >= 0.98f) {
+                Icon(
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(11.dp)
+                )
+            }
+            Text(
+                text = subtitleText,
+                fontSize = if (isCompact) 10.sp else 11.sp,
+                fontWeight = FontWeight.Medium,
+                color = if (percentage >= 0.98f) MaterialTheme.colorScheme.primary else Color(0xFF8E8E93),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+private fun saveCoverFromUri(context: android.content.Context, uri: Uri?): String? {
+    if (uri == null) return null
+    return try {
+        val file = java.io.File(context.filesDir, "cover_${System.currentTimeMillis()}.png")
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            java.io.FileOutputStream(file).use { output -> input.copyTo(output) }
+        }
+        file.absolutePath
+    } catch (_: Exception) {
+        null
+    }
+}
+
+@Composable
+fun ImportProgressDialog(
+    progress: ImportTaskProgress,
+    onDismissRequest: () -> Unit = {}
+) {
+    val animatedProgress by animateFloatAsState(
+        targetValue = progress.progressFraction.coerceIn(0f, 1f),
+        animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing),
+        label = "importProgressAnim"
+    )
+
+    Dialog(
+        onDismissRequest = onDismissRequest,
+        properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false)
+    ) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = Color(0xFF141418),
+            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+            shadowElevation = 16.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(52.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AutoStories,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                val headerText = if (progress.totalItems > 1) {
+                    "Importing Documents (${progress.currentItemIndex}/${progress.totalItems})"
+                } else {
+                    "Importing Document"
+                }
+
+                Text(
+                    text = headerText,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+
+                if (progress.currentTitle.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = progress.currentTitle,
+                        fontSize = 13.sp,
+                        color = Color.White.copy(alpha = 0.65f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                LinearProgressIndicator(
+                    progress = { animatedProgress },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(8.dp)
+                        .clip(RoundedCornerShape(4.dp)),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = Color.White.copy(alpha = 0.08f)
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = progress.currentStage.ifBlank { "Processing..." },
+                        fontSize = 12.sp,
+                        color = Color.White.copy(alpha = 0.70f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "${(animatedProgress * 100).toInt()}%",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+    }
+}
+
+data class SelectedDocumentDraft(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val uri: Uri,
+    val fileName: String,
+    val title: String,
+    val format: String,
+    val customCoverUri: Uri? = null,
+    val customCoverBitmap: androidx.compose.ui.graphics.ImageBitmap? = null,
+    val autoCoverBitmap: androidx.compose.ui.graphics.ImageBitmap? = null,
+    val isExtractingCover: Boolean = false,
+    val isFavorite: Boolean = false,
+    val collectionId: Long? = null,
+    val isExpanded: Boolean = false
+)
+
+private fun getFormatColor(format: String, primaryColor: Color): Color = when (format.uppercase()) {
+    "EPUB" -> Color(0xFFA855F7) // Violet
+    "PDF" -> Color(0xFFFF5252)  // Coral Red
+    "DOCX" -> Color(0xFF3B82F6) // Blue
+    "TXT" -> Color(0xFF10B981)  // Emerald
+    "HTML", "HTM" -> Color(0xFFF59E0B) // Amber
+    else -> primaryColor
+}
+
+@Composable
+fun CreateCategoryDialog(
+    existingNames: List<String>,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var name by remember { mutableStateOf("") }
+    val focusRequester = remember { FocusRequester() }
+    val isDuplicate = remember(name, existingNames) {
+        val trimmed = name.trim()
+        trimmed.isNotEmpty() && existingNames.any { it.equals(trimmed, ignoreCase = true) }
+    }
+    val isValid = name.trim().isNotBlank() && !isDuplicate
+
+    LaunchedEffect(Unit) {
+        delay(120)
+        try { focusRequester.requestFocus() } catch (_: Exception) {}
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF16161A),
+        shape = RoundedCornerShape(20.dp),
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CreateNewFolder,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Text(
+                        "New Category",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        color = Color.White
+                    )
+                }
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF222228))
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close",
+                        tint = Color(0xFFAAAAAA),
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "Create a custom category to organize and group your reading items.",
+                    fontSize = 12.sp,
+                    color = Color(0xFF8E8E93),
+                    lineHeight = 16.sp
+                )
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { if (it.length <= 40) name = it },
+                    placeholder = { Text("Category name (e.g. Science, Philosophy)", fontSize = 13.sp, color = Color(0xFF636366)) },
+                    textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = if (isDuplicate) Color(0xFFEF4444) else Color(0xFF2A2A32),
+                        focusedContainerColor = Color(0xFF101014),
+                        unfocusedContainerColor = Color(0xFF101014)
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = {
+                        if (isValid) {
+                            onConfirm(name.trim())
+                        }
+                    })
+                )
+                if (isDuplicate) {
+                    Text(
+                        text = "A category with this name already exists.",
+                        fontSize = 11.5.sp,
+                        color = Color(0xFFEF4444)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (isValid) {
+                        onConfirm(name.trim())
+                    }
+                },
+                enabled = isValid,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    disabledContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                ),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("Create", color = if (isValid) Color.White else Color(0xFF8E8E93), fontWeight = FontWeight.SemiBold)
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text("Cancel", color = Color(0xFF8E8E93))
+            }
+        }
+    )
+}
+
+@Composable
+fun CategorySelectionRow(
+    isFavorite: Boolean,
+    selectedCollectionId: Long?,
+    allCollections: List<CollectionEntity>,
+    onToggleFavorite: () -> Unit,
+    onSelectCollection: (Long?) -> Unit,
+    onOpenCreateCategory: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // + New Category Chip (placed cleanly in front of Favorites)
+        Surface(
+            onClick = onOpenCreateCategory,
+            shape = RoundedCornerShape(8.dp),
+            color = Color(0xFF19191E),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)),
+            modifier = Modifier.height(32.dp)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Add,
+                    contentDescription = "Create new category",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(14.dp)
+                )
+                Text(
+                    text = "New",
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+
+        // Favorites Chip
+        FilterChip(
+            selected = isFavorite,
+            onClick = onToggleFavorite,
+            leadingIcon = {
+                Icon(
+                    imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                    contentDescription = null,
+                    tint = if (isFavorite) Color(0xFFEF4444) else Color(0xFF8E8E93),
+                    modifier = Modifier.size(14.dp)
+                )
+            },
+            label = { Text("Favorites", fontSize = 11.5.sp) },
+            colors = FilterChipDefaults.filterChipColors(
+                selectedContainerColor = Color(0xFF3B181E),
+                selectedLabelColor = Color(0xFFFFB3B8),
+                containerColor = Color(0xFF101014),
+                labelColor = Color(0xFFC4C4C8)
+            ),
+            border = FilterChipDefaults.filterChipBorder(
+                enabled = true,
+                selected = isFavorite,
+                borderColor = Color(0xFF26262E),
+                selectedBorderColor = Color(0xFFEF4444).copy(alpha = 0.6f)
+            ),
+            shape = RoundedCornerShape(8.dp)
+        )
+
+        // User Collection / Category Chips
+        allCollections.forEach { col ->
+            val isSelected = selectedCollectionId == col.id
+            FilterChip(
+                selected = isSelected,
+                onClick = { onSelectCollection(if (isSelected) null else col.id) },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Default.Folder,
+                        contentDescription = null,
+                        tint = if (isSelected) MaterialTheme.colorScheme.primary else Color(0xFF8E8E93),
+                        modifier = Modifier.size(14.dp)
+                    )
+                },
+                label = { Text(col.name, fontSize = 11.5.sp, maxLines = 1) },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                    selectedLabelColor = MaterialTheme.colorScheme.primary,
+                    containerColor = Color(0xFF101014),
+                    labelColor = Color(0xFFC4C4C8)
+                ),
+                border = FilterChipDefaults.filterChipBorder(
+                    enabled = true,
+                    selected = isSelected,
+                    borderColor = Color(0xFF26262E),
+                    selectedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                ),
+                shape = RoundedCornerShape(8.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SelectedDraftItemCard(
+    draft: SelectedDocumentDraft,
+    allCollections: List<CollectionEntity>,
+    onToggleExpand: () -> Unit,
+    onTitleChange: (String) -> Unit,
+    onPickCover: () -> Unit,
+    onRemoveCover: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onSelectCollection: (Long?) -> Unit,
+    onOpenCreateCategory: () -> Unit = {},
+    onRemoveDraft: () -> Unit
+) {
+    val extColor = getFormatColor(draft.format, MaterialTheme.colorScheme.primary)
+    val displayedCover = draft.customCoverBitmap ?: draft.autoCoverBitmap
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = Color(0xFF16161A),
+        border = BorderStroke(
+            1.dp,
+            if (draft.isExpanded) MaterialTheme.colorScheme.primary.copy(alpha = 0.45f) else Color(0xFF24242A)
+        ),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            // Collapsed Header Row (Tap to expand/collapse)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onToggleExpand() }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Cover Preview Thumbnail (40x54dp)
+                Box(
+                    modifier = Modifier
+                        .size(width = 40.dp, height = 54.dp)
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(Color(0xFF202026))
+                        .border(
+                            1.dp,
+                            if (displayedCover != null) extColor.copy(alpha = 0.45f) else Color(0xFF2E2E36),
+                            RoundedCornerShape(7.dp)
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (displayedCover != null) {
+                        Image(
+                            bitmap = displayedCover,
+                            contentDescription = "Cover preview",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else if (draft.isExtractingCover) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = MaterialTheme.colorScheme.primary,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(
+                            imageVector = when (draft.format) {
+                                "EPUB" -> Icons.AutoMirrored.Filled.MenuBook
+                                "PDF" -> Icons.Default.PictureAsPdf
+                                else -> Icons.Default.Description
+                            },
+                            contentDescription = null,
+                            tint = extColor,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+
+                // Middle Info Column
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = draft.title,
+                        fontSize = 13.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        // Extension Badge
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(extColor.copy(alpha = 0.15f))
+                                .border(0.5.dp, extColor.copy(alpha = 0.35f), RoundedCornerShape(4.dp))
+                                .padding(horizontal = 5.dp, vertical = 1.dp)
+                        ) {
+                            Text(
+                                text = draft.format,
+                                fontSize = 9.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = extColor
+                            )
+                        }
+
+                        // Favorite badge if active
+                        if (draft.isFavorite) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color(0xFFEF4444).copy(alpha = 0.15f))
+                                    .padding(horizontal = 5.dp, vertical = 1.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Favorite,
+                                    contentDescription = null,
+                                    tint = Color(0xFFEF4444),
+                                    modifier = Modifier.size(10.dp)
+                                )
+                                Text(
+                                    text = "Favorite",
+                                    fontSize = 9.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFFEF4444)
+                                )
+                            }
+                        }
+
+                        // Collection name badge if active
+                        if (draft.collectionId != null) {
+                            val colName = allCollections.firstOrNull { it.id == draft.collectionId }?.name
+                            if (colName != null) {
+                                Text(
+                                    text = "• $colName",
+                                    fontSize = 10.5.sp,
+                                    color = Color(0xFF8E8E93),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Expand/Collapse Indicator
+                Icon(
+                    imageVector = if (draft.isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                    contentDescription = if (draft.isExpanded) "Collapse" else "Expand",
+                    tint = Color(0xFFAAAAAA),
+                    modifier = Modifier.size(20.dp)
+                )
+
+                // Remove Draft Icon
+                IconButton(
+                    onClick = onRemoveDraft,
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Remove file",
+                        tint = Color(0xFF71717A),
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+            }
+
+            // Expanded Options Section
+            AnimatedVisibility(visible = draft.isExpanded) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 12.dp, end = 12.dp, bottom = 12.dp, top = 2.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    HorizontalDivider(color = Color(0xFF24242C), thickness = 0.6.dp)
+
+                    // 1. Document Title Input
+                    OutlinedTextField(
+                        value = draft.title,
+                        onValueChange = onTitleChange,
+                        label = { Text("Document Title", fontSize = 11.5.sp) },
+                        textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 13.5.sp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = Color(0xFF2A2A32),
+                            focusedContainerColor = Color(0xFF101014),
+                            unfocusedContainerColor = Color(0xFF101014)
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+
+                    // 2. Book Cover Customization Option
+                    Surface(
+                        onClick = onPickCover,
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFF101014),
+                        border = BorderStroke(1.dp, Color(0xFF26262E)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(width = 36.dp, height = 48.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(Color(0xFF1E1E24))
+                                    .border(
+                                        1.dp,
+                                        if (displayedCover != null) MaterialTheme.colorScheme.primary.copy(alpha = 0.4f) else Color(0xFF2E2E36),
+                                        RoundedCornerShape(6.dp)
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (displayedCover != null) {
+                                    Image(
+                                        bitmap = displayedCover,
+                                        contentDescription = "Cover",
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                } else if (draft.isExtractingCover) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(14.dp),
+                                        color = MaterialTheme.colorScheme.primary,
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Image,
+                                        contentDescription = null,
+                                        tint = Color(0xFF71717A),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Book Cover",
+                                    fontSize = 12.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.White
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = when {
+                                        draft.customCoverUri != null -> "Custom cover selected"
+                                        draft.autoCoverBitmap != null -> "Detected from document"
+                                        draft.isExtractingCover -> "Extracting preview..."
+                                        else -> "No cover detected (tap to customize)"
+                                    },
+                                    fontSize = 11.sp,
+                                    color = if (displayedCover != null) MaterialTheme.colorScheme.primary else Color(0xFF8E8E93),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+
+                            if (draft.customCoverUri != null) {
+                                IconButton(
+                                    onClick = onRemoveCover,
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Remove Cover",
+                                        tint = Color(0xFF8E8E93),
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                }
+                            } else {
+                                Surface(
+                                    shape = RoundedCornerShape(7.dp),
+                                    color = Color(0xFF1E1E24),
+                                    border = BorderStroke(1.dp, Color(0xFF2E2E36))
+                                ) {
+                                    Text(
+                                        text = if (displayedCover != null) "Change" else "Add",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = Color.White,
+                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // 3. Add to Category & Favorites Section
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = "Add to Category",
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF8E8E93)
+                        )
+
+                        CategorySelectionRow(
+                            isFavorite = draft.isFavorite,
+                            selectedCollectionId = draft.collectionId,
+                            allCollections = allCollections,
+                            onToggleFavorite = onToggleFavorite,
+                            onSelectCollection = onSelectCollection,
+                            onOpenCreateCategory = onOpenCreateCategory
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -998,74 +2066,190 @@ fun AddDocumentDialog(
     initialType: AddInputType,
     selectedUri: Uri?,
     selectedFileName: String,
+    allCollections: List<CollectionEntity> = emptyList(),
     onDismiss: () -> Unit,
-    onAdd: (String, String, String?) -> Unit,
-    onUrlImport: (String, String?) -> Unit,
-    onUriImport: (Uri, String?) -> Unit
+    onOpenDeviceScanner: () -> Unit = {},
+    onCreateCollection: (String, (Long) -> Unit) -> Unit = { _, _ -> },
+    onAdd: (String, String, Uri?, Boolean, Long?) -> Unit,
+    onUrlImport: (String, String?, Uri?, Boolean, Long?) -> Unit,
+    onUriImport: (Uri, String?, Uri?, Boolean, Long?) -> Unit,
+    onBatchImport: ((List<SelectedDocumentDraft>) -> Unit)? = null
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val currentTab = initialType
+
+    // Multi-draft state for selected documents
+    var selectedDrafts by remember { mutableStateOf<List<SelectedDocumentDraft>>(emptyList()) }
+    var targetCoverDraftId by remember { mutableStateOf<String?>(null) }
+
+    // Category creation modal state
+    var showCreateCategoryDialog by remember { mutableStateOf(false) }
+    var createCategoryTargetDraftId by remember { mutableStateOf<String?>(null) }
+
+    // State for Paste and URL tabs
     var title by remember { mutableStateOf("") }
     var content by remember { mutableStateOf("") }
     var url by remember { mutableStateOf("") }
-    var currentTab by remember { mutableStateOf(initialType) }
+    var pasteOrUrlCoverUri by remember { mutableStateOf<Uri?>(null) }
+    var pasteOrUrlFavorite by remember { mutableStateOf(false) }
+    var pasteOrUrlCollectionId by remember { mutableStateOf<Long?>(null) }
 
-    // Set initial title when a file is picked (replacing underscores/hyphens with spaces and capitalizing)
+    // Multi-file Picker Launcher
+    val multiFilePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetMultipleContents()
+    ) { uris: List<Uri> ->
+        if (uris.isNotEmpty()) {
+            scope.launch {
+                val newDrafts = uris.map { uri ->
+                    var displayName = "Document"
+                    withContext(Dispatchers.IO) {
+                        try {
+                            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                                val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                                if (nameIndex != -1 && cursor.moveToFirst()) {
+                                    displayName = cursor.getString(nameIndex) ?: displayName
+                                }
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    val ext = displayName.substringAfterLast(".", "").uppercase()
+                    val cleanName = displayName.substringBeforeLast(".")
+                    val spaced = cleanName.replace(Regex("[_\\-]+"), " ")
+                    val cleanTitle = spaced.split(" ")
+                        .filter { it.isNotBlank() }
+                        .joinToString(" ") { word ->
+                            word.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() }
+                        }
+                    SelectedDocumentDraft(
+                        uri = uri,
+                        fileName = displayName,
+                        title = cleanTitle.ifBlank { displayName },
+                        format = ext.ifBlank { "DOC" },
+                        isExtractingCover = true,
+                        isExpanded = (uris.size == 1 && selectedDrafts.isEmpty())
+                    )
+                }
+                selectedDrafts = selectedDrafts + newDrafts
+
+                // Extract covers asynchronously in background
+                newDrafts.forEach { draft ->
+                    val cover = CoverPreviewHelper.extractCoverPreview(context, draft.uri, draft.fileName)
+                    selectedDrafts = selectedDrafts.map { d ->
+                        if (d.id == draft.id) d.copy(autoCoverBitmap = cover, isExtractingCover = false) else d
+                    }
+                }
+            }
+        }
+    }
+
+    // Cover Image Picker Launcher for a specific draft item
+    val draftCoverPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        val draftId = targetCoverDraftId
+        if (draftId != null && uri != null) {
+            scope.launch {
+                val decoded = CoverPreviewHelper.decodeImageUri(context, uri)
+                selectedDrafts = selectedDrafts.map { d ->
+                    if (d.id == draftId) d.copy(customCoverUri = uri, customCoverBitmap = decoded) else d
+                }
+            }
+        }
+        targetCoverDraftId = null
+    }
+
+    // Single Cover Image Picker for Paste and URL tabs
+    val singleCoverPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        pasteOrUrlCoverUri = uri
+    }
+
+    // Initialize with selectedUri if passed from outside
     LaunchedEffect(selectedUri, selectedFileName) {
-        if (selectedUri != null && currentTab == AddInputType.FILE) {
+        if (selectedUri != null && selectedDrafts.isEmpty()) {
+            val ext = selectedFileName.substringAfterLast(".", "").uppercase()
             val cleanName = selectedFileName.substringBeforeLast(".")
             val spaced = cleanName.replace(Regex("[_\\-]+"), " ")
-            title = spaced.split(" ")
+            val cleanTitle = spaced.split(" ")
                 .filter { it.isNotBlank() }
                 .joinToString(" ") { word ->
                     word.replaceFirstChar { if (it.isLowerCase()) it.titlecase(java.util.Locale.getDefault()) else it.toString() }
                 }
+            val initialDraft = SelectedDocumentDraft(
+                uri = selectedUri,
+                fileName = selectedFileName,
+                title = cleanTitle.ifBlank { selectedFileName },
+                format = ext.ifBlank { "DOC" },
+                isExtractingCover = true,
+                isExpanded = true
+            )
+            selectedDrafts = listOf(initialDraft)
+            scope.launch {
+                val cover = CoverPreviewHelper.extractCoverPreview(context, selectedUri, selectedFileName)
+                selectedDrafts = selectedDrafts.map {
+                    if (it.id == initialDraft.id) it.copy(autoCoverBitmap = cover, isExtractingCover = false) else it
+                }
+            }
         }
     }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    "Import Document",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 20.sp,
-                    color = Color.White
-                )
-                
-                // Tab Selection headers
+            onDismissRequest = onDismiss,
+            title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(38.dp)
-                        .clip(RoundedCornerShape(19.dp))
-                        .background(Color(0xFF1D1D21))
-                        .padding(2.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    val tabs = listOf(
-                        AddInputType.FILE to "File",
-                        AddInputType.PASTE to "Paste Text",
-                        AddInputType.URL to "Link / URL"
-                    )
-                    for ((tab, label) in tabs) {
-                        val isSelected = currentTab == tab
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxHeight()
-                                .clip(RoundedCornerShape(17.dp))
-                                .background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent)
-                                .clickable { currentTab = tab },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = label,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isSelected) Color.White else Color.Gray
-                            )
-                        }
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = when (currentTab) {
+                                AddInputType.FILE -> Icons.Default.FolderOpen
+                                AddInputType.PASTE -> Icons.Default.ContentPaste
+                                AddInputType.URL -> Icons.Default.Link
+                            },
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
                     }
+                    Text(
+                        text = when (currentTab) {
+                            AddInputType.FILE -> "Import Documents"
+                            AddInputType.PASTE -> "Paste Text"
+                            AddInputType.URL -> "Import Web Article"
+                        },
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        color = Color.White
+                    )
+                }
+
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF222228))
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close",
+                        tint = Color(0xFFAAAAAA),
+                        modifier = Modifier.size(16.dp)
+                    )
                 }
             }
         },
@@ -1074,70 +2258,330 @@ fun AddDocumentDialog(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 when (currentTab) {
                     AddInputType.FILE -> {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(Color(0xFF1B1B1E))
-                                    .border(1.dp, Color(0xFF333339), RoundedCornerShape(12.dp))
-                                    .padding(16.dp),
-                                contentAlignment = Alignment.Center
+                        if (selectedDrafts.isEmpty()) {
+                            // Elevated initial state using reclaimed modal space
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                Text(
+                                    text = "Add books, research papers, or articles to your library:",
+                                    fontSize = 12.sp,
+                                    color = Color(0xFF8E8E93),
+                                    lineHeight = 16.sp
+                                )
+
+                                // Option 1: Scan Device for Files
+                                Surface(
+                                    onClick = onOpenDeviceScanner,
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+                                    modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Attachment,
-                                        contentDescription = "File attached",
-                                        tint = Color(0xFF9E82F5)
-                                    )
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(16.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(46.dp)
+                                                .clip(RoundedCornerShape(13.dp))
+                                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.20f)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.FindInPage,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(24.dp)
+                                            )
+                                        }
+
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "Scan Device Storage",
+                                                fontSize = 15.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color.White
+                                            )
+                                            Spacer(modifier = Modifier.height(3.dp))
+                                            Text(
+                                                text = "Auto-detect EPUB, PDF & documents on your phone",
+                                                fontSize = 11.5.sp,
+                                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                                                lineHeight = 15.sp
+                                            )
+                                        }
+
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = MaterialTheme.colorScheme.primary
+                                        ) {
+                                            Text(
+                                                text = "Scan",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color.White,
+                                                modifier = Modifier.padding(horizontal = 13.dp, vertical = 7.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // Option 2: Choose Files Manually (supports multiple files)
+                                Surface(
+                                    onClick = { multiFilePickerLauncher.launch("*/*") },
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = Color(0xFF16161A),
+                                    border = BorderStroke(1.dp, Color(0xFF282832)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(16.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(46.dp)
+                                                .clip(RoundedCornerShape(13.dp))
+                                                .background(Color(0xFF222228)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.FolderOpen,
+                                                contentDescription = null,
+                                                tint = Color.White,
+                                                modifier = Modifier.size(24.dp)
+                                            )
+                                        }
+
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "Browse Files Manually",
+                                                fontSize = 15.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color.White
+                                            )
+                                            Spacer(modifier = Modifier.height(3.dp))
+                                            Text(
+                                                text = "Pick single or multiple files from file manager",
+                                                fontSize = 11.5.sp,
+                                                color = Color(0xFF8E8E93),
+                                                lineHeight = 15.sp
+                                            )
+                                        }
+
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = Color(0xFF222228),
+                                            border = BorderStroke(1.dp, Color(0xFF353540))
+                                        ) {
+                                            Text(
+                                                text = "Browse",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                color = Color.White,
+                                                modifier = Modifier.padding(horizontal = 13.dp, vertical = 7.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // Supported Formats Indicator Strip
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
                                     Text(
-                                        text = selectedFileName.ifBlank { "No File Chosen" },
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (selectedUri != null) Color.White else Color.Gray,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                        text = "Formats:",
+                                        fontSize = 10.5.sp,
+                                        color = Color(0xFF636366),
+                                        fontWeight = FontWeight.Medium
                                     )
+                                    val formats = listOf(
+                                        "EPUB" to Color(0xFFA855F7),
+                                        "PDF" to Color(0xFFFF5252),
+                                        "DOCX" to Color(0xFF3B82F6),
+                                        "TXT" to Color(0xFF10B981)
+                                    )
+                                    formats.forEach { (name, color) ->
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(4.dp))
+                                                .background(color.copy(alpha = 0.12f))
+                                                .border(0.5.dp, color.copy(alpha = 0.35f), RoundedCornerShape(4.dp))
+                                                .padding(horizontal = 5.dp, vertical = 1.5.dp)
+                                        ) {
+                                            Text(
+                                                text = name,
+                                                fontSize = 9.5.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = color
+                                            )
+                                        }
+                                    }
                                 }
                             }
-                            
-                            OutlinedTextField(
-                                value = title,
-                                onValueChange = { title = it },
-                                label = { Text("Document Title") },
-                                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                    unfocusedBorderColor = Color(0xFF333339)
-                                ),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("doc_add_title"),
-                                singleLine = true
-                            )
+                        } else {
+                            // File(s) selected: "Scan Device for Files" disappears!
+                            // Displays clean header and expandable list of files.
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                // Action Header: Count, Add More, Clear All
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Selected Files (${selectedDrafts.size})",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        TextButton(
+                                            onClick = { multiFilePickerLauncher.launch("*/*") },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Add,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("Add More", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                                        }
+                                        TextButton(
+                                            onClick = { selectedDrafts = emptyList() },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                        ) {
+                                            Text("Clear All", fontSize = 12.sp, color = Color(0xFF8E8E93))
+                                        }
+                                    }
+                                }
+
+                                // Clean, compact category row for multiple files
+                                if (selectedDrafts.size > 1) {
+                                    val commonFav = selectedDrafts.all { it.isFavorite }
+                                    val commonColId = selectedDrafts.map { it.collectionId }.distinct().let {
+                                        if (it.size == 1) it.first() else null
+                                    }
+
+                                    Column(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Text(
+                                            text = "Category for all files:",
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = Color(0xFF8E8E93)
+                                        )
+
+                                        CategorySelectionRow(
+                                            isFavorite = commonFav,
+                                            selectedCollectionId = commonColId,
+                                            allCollections = allCollections,
+                                            onToggleFavorite = {
+                                                val newFav = !commonFav
+                                                selectedDrafts = selectedDrafts.map { it.copy(isFavorite = newFav) }
+                                            },
+                                            onSelectCollection = { colId ->
+                                                selectedDrafts = selectedDrafts.map { it.copy(collectionId = colId) }
+                                            },
+                                            onOpenCreateCategory = {
+                                                createCategoryTargetDraftId = "BATCH_ALL"
+                                                showCreateCategoryDialog = true
+                                            }
+                                        )
+                                    }
+                                }
+
+                                // Scrollable list of expandable drafts
+                                LazyColumn(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 380.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    items(selectedDrafts, key = { it.id }) { draft ->
+                                        SelectedDraftItemCard(
+                                            draft = draft,
+                                            allCollections = allCollections,
+                                            onToggleExpand = {
+                                                selectedDrafts = selectedDrafts.map {
+                                                    if (it.id == draft.id) it.copy(isExpanded = !it.isExpanded) else it
+                                                }
+                                            },
+                                            onTitleChange = { newTitle ->
+                                                selectedDrafts = selectedDrafts.map {
+                                                    if (it.id == draft.id) it.copy(title = newTitle) else it
+                                                }
+                                            },
+                                            onPickCover = {
+                                                targetCoverDraftId = draft.id
+                                                draftCoverPickerLauncher.launch("image/*")
+                                            },
+                                            onRemoveCover = {
+                                                selectedDrafts = selectedDrafts.map {
+                                                    if (it.id == draft.id) it.copy(customCoverUri = null, customCoverBitmap = null) else it
+                                                }
+                                            },
+                                            onToggleFavorite = {
+                                                selectedDrafts = selectedDrafts.map {
+                                                    if (it.id == draft.id) it.copy(isFavorite = !it.isFavorite) else it
+                                                }
+                                            },
+                                            onSelectCollection = { colId ->
+                                                selectedDrafts = selectedDrafts.map {
+                                                    if (it.id == draft.id) it.copy(collectionId = colId) else it
+                                                }
+                                            },
+                                            onOpenCreateCategory = {
+                                                createCategoryTargetDraftId = draft.id
+                                                showCreateCategoryDialog = true
+                                            },
+                                            onRemoveDraft = {
+                                                selectedDrafts = selectedDrafts.filter { it.id != draft.id }
+                                            }
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                     AddInputType.PASTE -> {
-                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 420.dp)
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
                             // Preload Sample Fast buttons
-                            Text(
-                                text = "QUICK LOAD PRESETS",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)
-                            )
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Button(
+                                Surface(
                                     onClick = {
                                         title = "The Magic of Local AI"
                                         content = """For years, running large neural network architectures meant piping personal parameters back and forth to giant server racks hosted in centralized clouds. Today, modern micro-onnx ran pipelines make running speech synthesizers directly inside your pocket fully real. 
@@ -1145,19 +2589,35 @@ fun AddDocumentDialog(
 This is incredibly important for mobile computers, meaning zero networking costs, absolute tracking privacy, and uninterrupted playback inside planes or subway commutes."""
                                         url = ""
                                     },
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                                        contentColor = MaterialTheme.colorScheme.primary
-                                    ),
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)),
                                     modifier = Modifier
                                         .weight(1f)
-                                        .height(36.dp),
-                                    contentPadding = PaddingValues(0.dp)
+                                        .height(34.dp)
                                 ) {
-                                    Text("Edge AI Preset", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    Row(
+                                        modifier = Modifier.fillMaxSize(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.AutoAwesome,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            "AI Preset",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
                                 }
 
-                                Button(
+                                Surface(
                                     onClick = {
                                         title = "Mindfulness & Flow State"
                                         content = """Achieving professional mastery is rarely about running faster; it is about learning how to calm the noise. Flow states happen when there is a perfect equilibrium between the difficulty of a challenge and your absolute dedicated focus. 
@@ -1165,30 +2625,47 @@ This is incredibly important for mobile computers, meaning zero networking costs
 By eliminating the constant visual notifications of modern computers and turning text-heavy articles into an elegant audio-stream, you can consume long-form thinking while resting your eyes and keeping the mind in a deep flow channel."""
                                         url = ""
                                     },
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                                        contentColor = MaterialTheme.colorScheme.primary
-                                    ),
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)),
                                     modifier = Modifier
                                         .weight(1f)
-                                        .height(36.dp),
-                                    contentPadding = PaddingValues(0.dp)
+                                        .height(34.dp)
                                 ) {
-                                    Text("Flow State Preset", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    Row(
+                                        modifier = Modifier.fillMaxSize(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.SelfImprovement,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            "Flow Preset",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
                                 }
                             }
-
-                            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = Color(0xFF1D1D21))
 
                             OutlinedTextField(
                                 value = title,
                                 onValueChange = { title = it },
-                                label = { Text("Document Title") },
-                                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White),
+                                label = { Text("Title (Optional)", fontSize = 12.sp) },
+                                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp),
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                    unfocusedBorderColor = Color(0xFF333339)
+                                    unfocusedBorderColor = Color(0xFF2A2A32),
+                                    focusedContainerColor = Color(0xFF16161A),
+                                    unfocusedContainerColor = Color(0xFF16161A)
                                 ),
+                                shape = RoundedCornerShape(14.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .testTag("doc_add_title"),
@@ -1198,37 +2675,93 @@ By eliminating the constant visual notifications of modern computers and turning
                             OutlinedTextField(
                                 value = content,
                                 onValueChange = { content = it },
-                                label = { Text("Article Content / Raw Text") },
-                                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White),
+                                label = { Text("Article Content / Raw Text", fontSize = 12.sp) },
+                                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp),
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                    unfocusedBorderColor = Color(0xFF333339)
+                                    unfocusedBorderColor = Color(0xFF2A2A32),
+                                    focusedContainerColor = Color(0xFF16161A),
+                                    unfocusedContainerColor = Color(0xFF16161A)
                                 ),
+                                shape = RoundedCornerShape(14.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(140.dp)
+                                    .height(130.dp)
                                     .testTag("doc_add_content"),
-                                maxLines = 10
+                                maxLines = 8
                             )
+
+                            // Optional cover and collections for pasted text
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                TextButton(
+                                    onClick = { singleCoverPickerLauncher.launch("image/*") },
+                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                                ) {
+                                    Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(if (pasteOrUrlCoverUri != null) "Cover Attached" else "Add Cover", fontSize = 11.5.sp, color = MaterialTheme.colorScheme.primary)
+                                }
+                                if (pasteOrUrlCoverUri != null) {
+                                    TextButton(onClick = { pasteOrUrlCoverUri = null }) {
+                                        Text("Remove Cover", fontSize = 11.sp, color = Color(0xFF8E8E93))
+                                    }
+                                }
+                            }
+
+                            // Category and favorites section
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(
+                                    text = "Add to Category",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF8E8E93)
+                                )
+
+                                CategorySelectionRow(
+                                    isFavorite = pasteOrUrlFavorite,
+                                    selectedCollectionId = pasteOrUrlCollectionId,
+                                    allCollections = allCollections,
+                                    onToggleFavorite = { pasteOrUrlFavorite = !pasteOrUrlFavorite },
+                                    onSelectCollection = { colId -> pasteOrUrlCollectionId = colId },
+                                    onOpenCreateCategory = {
+                                        createCategoryTargetDraftId = "PASTE_OR_URL"
+                                        showCreateCategoryDialog = true
+                                    }
+                                )
+                            }
                         }
                     }
                     AddInputType.URL -> {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 420.dp)
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
                             Text(
-                                text = "Paste a URL bookmark from Wikipedia or standard web articles to extract full-text content.",
+                                text = "Extracts full article content directly from web links & Wikipedia articles.",
                                 fontSize = 11.sp,
-                                color = Color.Gray
+                                color = Color(0xFF8E8E93),
+                                lineHeight = 15.sp
                             )
-                            
+
                             OutlinedTextField(
                                 value = url,
                                 onValueChange = { url = it },
-                                label = { Text("Article URL / Address") },
-                                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White),
+                                label = { Text("Article URL / Address", fontSize = 12.sp) },
+                                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp),
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                    unfocusedBorderColor = Color(0xFF333339)
+                                    unfocusedBorderColor = Color(0xFF2A2A32),
+                                    focusedContainerColor = Color(0xFF16161A),
+                                    unfocusedContainerColor = Color(0xFF16161A)
                                 ),
+                                shape = RoundedCornerShape(14.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .testTag("doc_add_url"),
@@ -1238,17 +2771,63 @@ By eliminating the constant visual notifications of modern computers and turning
                             OutlinedTextField(
                                 value = title,
                                 onValueChange = { title = it },
-                                label = { Text("Document Title (Optional/Auto)") },
-                                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White),
+                                label = { Text("Title (Optional/Auto)", fontSize = 12.sp) },
+                                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp),
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                    unfocusedBorderColor = Color(0xFF333339)
+                                    unfocusedBorderColor = Color(0xFF2A2A32),
+                                    focusedContainerColor = Color(0xFF16161A),
+                                    unfocusedContainerColor = Color(0xFF16161A)
                                 ),
+                                shape = RoundedCornerShape(14.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .testTag("doc_add_title"),
                                 singleLine = true
                             )
+
+                            // Optional cover and collections for web links
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                TextButton(
+                                    onClick = { singleCoverPickerLauncher.launch("image/*") },
+                                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                                ) {
+                                    Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(if (pasteOrUrlCoverUri != null) "Cover Attached" else "Add Cover", fontSize = 11.5.sp, color = MaterialTheme.colorScheme.primary)
+                                }
+                                if (pasteOrUrlCoverUri != null) {
+                                    TextButton(onClick = { pasteOrUrlCoverUri = null }) {
+                                        Text("Remove Cover", fontSize = 11.sp, color = Color(0xFF8E8E93))
+                                    }
+                                }
+                            }
+
+                            // Category and favorites section
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(
+                                    text = "Add to Category",
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF8E8E93)
+                                )
+
+                                CategorySelectionRow(
+                                    isFavorite = pasteOrUrlFavorite,
+                                    selectedCollectionId = pasteOrUrlCollectionId,
+                                    allCollections = allCollections,
+                                    onToggleFavorite = { pasteOrUrlFavorite = !pasteOrUrlFavorite },
+                                    onSelectCollection = { colId -> pasteOrUrlCollectionId = colId },
+                                    onOpenCreateCategory = {
+                                        createCategoryTargetDraftId = "PASTE_OR_URL"
+                                        showCreateCategoryDialog = true
+                                    }
+                                )
+                            }
                         }
                     }
                 }
@@ -1259,47 +2838,124 @@ By eliminating the constant visual notifications of modern computers and turning
                 onClick = { 
                     when (currentTab) {
                         AddInputType.FILE -> {
-                            if (selectedUri != null) {
-                                onUriImport(selectedUri, title)
+                            if (selectedDrafts.isNotEmpty()) {
+                                if (selectedDrafts.size == 1) {
+                                    val single = selectedDrafts.first()
+                                    onUriImport(
+                                        single.uri,
+                                        single.title.ifBlank { null },
+                                        single.customCoverUri,
+                                        single.isFavorite,
+                                        single.collectionId
+                                    )
+                                } else if (onBatchImport != null) {
+                                    onBatchImport(selectedDrafts)
+                                } else {
+                                    selectedDrafts.forEach { draft ->
+                                        onUriImport(
+                                            draft.uri,
+                                            draft.title.ifBlank { null },
+                                            draft.customCoverUri,
+                                            draft.isFavorite,
+                                            draft.collectionId
+                                        )
+                                    }
+                                }
                             }
                         }
                         AddInputType.PASTE -> {
                             if (content.isNotBlank()) {
-                                onAdd(title, content, null)
+                                onAdd(
+                                    title.ifBlank { "Pasted Article" },
+                                    content,
+                                    pasteOrUrlCoverUri,
+                                    pasteOrUrlFavorite,
+                                    pasteOrUrlCollectionId
+                                )
                             }
                         }
                         AddInputType.URL -> {
                             if (url.isNotBlank()) {
-                                onUrlImport(url, title.ifBlank { null })
+                                onUrlImport(
+                                    url,
+                                    title.ifBlank { null },
+                                    pasteOrUrlCoverUri,
+                                    pasteOrUrlFavorite,
+                                    pasteOrUrlCollectionId
+                                )
                             }
                         }
                     }
                 },
                 enabled = when (currentTab) {
-                    AddInputType.FILE -> selectedUri != null
+                    AddInputType.FILE -> selectedDrafts.isNotEmpty()
                     AddInputType.PASTE -> content.isNotBlank()
                     AddInputType.URL -> url.isNotBlank()
                 },
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.primary,
-                    disabledContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                    disabledContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
                 ),
+                shape = RoundedCornerShape(14.dp),
                 modifier = Modifier.testTag("doc_submit_add_btn")
             ) {
-                Text("Ingest & Synthesize", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                val btnLabel = when (currentTab) {
+                    AddInputType.FILE -> {
+                        if (selectedDrafts.size > 1) "Import ${selectedDrafts.size} Documents" else "Add to Library"
+                    }
+                    AddInputType.PASTE -> "Save to Library"
+                    AddInputType.URL -> "Import Article"
+                }
+                Text(btnLabel, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
             }
         },
         dismissButton = {
             TextButton(
                 onClick = onDismiss,
-                colors = ButtonDefaults.textButtonColors(contentColor = Color.LightGray)
+                colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF8E8E93))
             ) {
-                Text("Cancel", fontSize = 12.sp)
+                Text("Cancel", fontSize = 13.sp)
             }
         },
-        containerColor = Color(0xFF141416),
-        shape = RoundedCornerShape(24.dp)
+        containerColor = Color(0xFF121215),
+        shape = RoundedCornerShape(26.dp)
     )
+
+    if (showCreateCategoryDialog) {
+        CreateCategoryDialog(
+            existingNames = allCollections.map { it.name },
+            onDismiss = {
+                showCreateCategoryDialog = false
+                createCategoryTargetDraftId = null
+            },
+            onConfirm = { catName ->
+                onCreateCollection(catName) { newColId ->
+                    when (val target = createCategoryTargetDraftId) {
+                        "BATCH_ALL" -> {
+                            selectedDrafts = selectedDrafts.map { it.copy(collectionId = newColId) }
+                        }
+                        "PASTE_OR_URL" -> {
+                            pasteOrUrlCollectionId = newColId
+                        }
+                        null -> {
+                            if (selectedDrafts.size == 1) {
+                                selectedDrafts = selectedDrafts.map { it.copy(collectionId = newColId) }
+                            } else {
+                                pasteOrUrlCollectionId = newColId
+                            }
+                        }
+                        else -> {
+                            selectedDrafts = selectedDrafts.map {
+                                if (it.id == target) it.copy(collectionId = newColId) else it
+                            }
+                        }
+                    }
+                }
+                showCreateCategoryDialog = false
+                createCategoryTargetDraftId = null
+            }
+        )
+    }
 }
 
 private fun Int.getOrZeroPercent(): Int = if (this < 0) 0 else this
@@ -1381,8 +3037,16 @@ fun MiniPlayer(
             modifier = Modifier
                 .fillMaxSize()
                 .clip(RoundedCornerShape(36.dp))
-                .background(Color(0xD9141416))
-                .border(1.dp, Color(0x99242426), RoundedCornerShape(36.dp))
+                .background(Color(0xE6141418))
+                .border(
+                    androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        Brush.verticalGradient(
+                            listOf(Color.White.copy(alpha = 0.20f), Color.White.copy(alpha = 0.04f))
+                        )
+                    ),
+                    RoundedCornerShape(36.dp)
+                )
                 .clickable {
                     hapticTrigger()
                     onExpand()
@@ -1472,19 +3136,26 @@ fun MiniPlayer(
                         fontWeight = FontWeight.Bold,
                         color = Color.White,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .basicMarquee(
+                                iterations = Int.MAX_VALUE,
+                                repeatDelayMillis = 1500,
+                                velocity = 30.dp
+                            )
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     
                     val infoText by remember(document, progressFraction) {
                         derivedStateOf {
                             val percentage = (progressFraction * 100).toInt().coerceIn(0, 100)
-                            val totalWords = document.contentLength / 6
+                            val charCount = document.contentLength.takeIf { it > 0 } ?: document.content.length.coerceAtLeast(1)
+                            val totalWords = (charCount / 5).coerceAtLeast(1)
                             val wordsRemaining = ((1f - progressFraction) * totalWords).toInt().coerceAtLeast(0)
                             val speed = if (document.playbackSpeed > 0f) document.playbackSpeed else 1.0f
                             val totalSeconds = (wordsRemaining / (2.5f * speed)).toInt()
-                            val timeRemaining = if (totalSeconds <= 0) {
-                                "0s remaining"
+                            val timeRemaining = if (percentage >= 100 || totalSeconds <= 0) {
+                                "Completed"
                             } else if (totalSeconds < 60) {
                                 "${totalSeconds}s remaining"
                             } else {
@@ -1501,7 +3172,7 @@ fun MiniPlayer(
                                     }
                                 }
                             }
-                            "$percentage% / $timeRemaining"
+                            if (percentage >= 100) "100% · Completed" else "$percentage% · $timeRemaining"
                         }
                     }
                     Text(
@@ -1551,6 +3222,23 @@ fun MiniPlayer(
                         modifier = Modifier.size(18.dp)
                     )
                 }
+            }
+
+            // Sleek bottom progress track line
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .clip(RoundedCornerShape(bottomStart = 36.dp, bottomEnd = 36.dp))
+                    .background(Color(0x22FFFFFF))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(fraction = progressFraction.coerceIn(0f, 1f))
+                        .fillMaxHeight()
+                        .background(MaterialTheme.colorScheme.primary)
+                )
             }
         }
     }

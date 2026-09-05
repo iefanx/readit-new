@@ -43,6 +43,23 @@ data class BenchmarkResult(
 
 data class ExtractedDocument(val content: String, val chapters: List<ChapterCandidate>)
 
+data class ImportTaskProgress(
+    val isImporting: Boolean = false,
+    val currentItemIndex: Int = 0,
+    val totalItems: Int = 0,
+    val currentTitle: String = "",
+    val currentStage: String = "",
+    val progressFraction: Float = 0f
+)
+
+data class BatchImportItem(
+    val uri: android.net.Uri,
+    val title: String?,
+    val customCoverUri: android.net.Uri? = null,
+    val isFavorite: Boolean = false,
+    val collectionId: Long? = null
+)
+
 // Pre-compiled once at class level — avoids allocating a Regex on every line of text during PDF/EPUB parsing
 private val BULLET_LIST_REGEX = Regex("^\\d+\\.\\s+.*")
 
@@ -82,9 +99,12 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
     private val _isPreparingPlayback = MutableStateFlow(false)
     val isPreparingPlayback = _isPreparingPlayback.asStateFlow()
 
-    // Import visual loading state
+    // Import visual loading state and granular progress tracking
     private val _isImporting = MutableStateFlow(false)
     val isImporting = _isImporting.asStateFlow()
+
+    private val _importProgress = MutableStateFlow(ImportTaskProgress())
+    val importProgress = _importProgress.asStateFlow()
 
     private val _importError = MutableStateFlow<String?>(null)
     val importError = _importError.asStateFlow()
@@ -118,6 +138,7 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
     val selectedVoiceId: StateFlow<String>
     val availableVoices: StateFlow<List<VoiceInfo>>
     val translationTargetLang: StateFlow<String>
+    val translatedSentences: StateFlow<Map<Int, String>>
 
     private val _themeColor = MutableStateFlow<Color>(OledPrimary)
     val themeColor = _themeColor.asStateFlow()
@@ -196,6 +217,7 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
         selectedVoiceId = ttsEngine.selectedVoiceId
         availableVoices = ttsEngine.availableVoices
         translationTargetLang = ttsEngine.translationTargetLang
+        translatedSentences = ttsEngine.translatedSentences
 
         // Listen for sentence changes to update Room position with a debounce of 3 seconds
         viewModelScope.launch {
@@ -216,8 +238,7 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
         }
 
         // Trigger preloads if we haven't preloaded v4 samples before.
-        // Use first() so this coroutine terminates after the initial DB emission instead
-        // of keeping an eternal Flow subscription alive for the ViewModel's lifetime.
+        // Also backfill contentLength for any existing documents that have contentLength <= 0.
         viewModelScope.launch {
             val hasPreloaded = sharedPrefs.getBoolean("has_preloaded_samples_v4", false)
             if (!hasPreloaded) {
@@ -232,13 +253,34 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
                 }
                 preloadSampleBooks()
                 sharedPrefs.edit().putBoolean("has_preloaded_samples_v4", true).apply()
+            } else {
+                // Ensure existing docs have valid contentLength
+                val list = allDocuments.first()
+                for (doc in list) {
+                    if (doc.contentLength <= 0) {
+                        try {
+                            val fullDoc = documentRepository.getDocumentById(doc.id)
+                            if (fullDoc != null && fullDoc.content.isNotEmpty()) {
+                                documentRepository.update(fullDoc.copy(contentLength = fullDoc.content.length))
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+                }
             }
         }
 
         viewModelScope.launch {
-            allDocuments.collectLatest { docs ->
-                warmSentenceCache(docs.take(4))
-            }
+            allDocuments
+                .map { docs -> docs.map { it.id } }
+                .distinctUntilChanged()
+                .collectLatest { docIds ->
+                    val docsToWarm = allDocuments.value.filter { it.id in docIds.take(4) }
+                    if (docsToWarm.isNotEmpty()) {
+                        warmSentenceCache(docsToWarm)
+                    }
+                }
         }
     }
 
@@ -257,31 +299,33 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
                 val extracted = extractTextFromEpub(tempFile)
                 val coverPath = extractEpubCover(tempFile)
                 tempFile.delete()
+                val contentStr = extracted.content.ifBlank { "Error parsing The Odyssey." }
                 
                 Document(
                     title = "The Odyssey",
-                    content = extracted.content.ifBlank { "Error parsing The Odyssey." },
+                    content = contentStr,
                     sourceUrl = "Homer",
                     coverPath = coverPath,
                     selectedModelTier = "HIGH_FIDELITY",
-                    playbackSpeed = 1.0f
+                    playbackSpeed = 1.0f,
+                    contentLength = contentStr.length
                 ) to extracted.chapters
             } catch (e: Exception) {
                 e.printStackTrace()
+                val fallbackContent = "Error loading The Odyssey from assets."
                 Document(
                     title = "The Odyssey",
-                    content = "Error loading The Odyssey from assets.",
+                    content = fallbackContent,
                     sourceUrl = "Homer",
                     selectedModelTier = "HIGH_FIDELITY",
-                    playbackSpeed = 1.0f
+                    playbackSpeed = 1.0f,
+                    contentLength = fallbackContent.length
                 ) to emptyList<ChapterCandidate>()
             }
         }
 
         // 2. Load "About this app" document
-        val aboutDoc = Document(
-            title = "About this app, what this app can do",
-            content = """Welcome to Readout, your premium, distraction-free reading assistant.
+        val aboutContent = """Welcome to Readout, your premium, distraction-free reading assistant.
 
 Here is what this app can do:
 
@@ -293,10 +337,15 @@ Here is what this app can do:
 
 4. Sleep Countdown Timer: Set a sleep timer from the settings panel to automatically pause audio playback after a specified amount of time.
 
-5. Interactive Navigation & Speed Control: Adjust playback speeds fluidly from 0.5x up to 4.5x. Tap or drag the progress bar to skip, double-tap on any sentence to jump the reader to that location, and view cumulative follow-along karaoke highlights as you listen.""",
+5. Interactive Navigation & Speed Control: Adjust playback speeds fluidly from 0.5x up to 4.5x. Tap or drag the progress bar to skip, double-tap on any sentence to jump the reader to that location, and view cumulative follow-along karaoke highlights as you listen.""".trimIndent()
+
+        val aboutDoc = Document(
+            title = "About this app, what this app can do",
+            content = aboutContent,
             sourceUrl = "Readout User Guide",
             selectedModelTier = "HIGH_FIDELITY",
-            playbackSpeed = 1.0f
+            playbackSpeed = 1.0f,
+            contentLength = aboutContent.length
         )
 
         // Insert Odyssey
@@ -331,7 +380,11 @@ Here is what this app can do:
         documentSelectionJob = viewModelScope.launch {
             try {
                 val fullDoc = documentRepository.getDocumentById(document.id) ?: document
-                val updatedDoc = fullDoc.copy(lastReadTime = System.currentTimeMillis())
+                val targetLength = if (fullDoc.contentLength > 0) fullDoc.contentLength else fullDoc.content.length
+                val updatedDoc = fullDoc.copy(
+                    lastReadTime = System.currentTimeMillis(),
+                    contentLength = targetLength
+                )
                 _activeDocument.value = updatedDoc
                 _activeSentences.value = getCachedSentences(updatedDoc).orEmpty()
                 documentRepository.update(updatedDoc)
@@ -585,32 +638,104 @@ Here is what this app can do:
         ttsEngine.startSleepTimer(minutes)
     }
 
-    fun addNewBook(title: String, content: String, sourceUrl: String?, coverPath: String? = null, chapters: List<ChapterCandidate> = emptyList(), autoSelect: Boolean = true) {
-        viewModelScope.launch {
-            val doc = Document(
-                title = title.ifBlank { "Untitled Document" },
-                content = content,
-                sourceUrl = sourceUrl?.ifBlank { null },
-                coverPath = coverPath,
-                contentLength = content.length
-            )
-            val generatedId = documentRepository.insert(doc)
-            val createdDoc = doc.copy(id = generatedId)
-            
-            if (chapters.isNotEmpty()) {
-                val dbChapters = chapters.map { candidate ->
-                    Chapter(
-                        documentId = generatedId,
-                        title = candidate.title,
-                        startCharOffset = candidate.charOffset
-                    )
+    fun saveCoverFromUri(uri: android.net.Uri?): String? {
+        if (uri == null) return null
+        return try {
+            val context = getApplication<Application>()
+            val coverFile = File(context.filesDir, "cover_${System.currentTimeMillis()}.png")
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(coverFile).use { output ->
+                    input.copyTo(output)
                 }
-                documentRepository.insertChapters(dbChapters)
             }
-            
-            if (autoSelect) {
+            coverFile.absolutePath
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+
+    suspend fun insertDocumentInternal(
+        title: String,
+        content: String,
+        sourceUrl: String?,
+        coverPath: String? = null,
+        chapters: List<ChapterCandidate> = emptyList(),
+        autoSelect: Boolean = false,
+        customCoverUri: android.net.Uri? = null,
+        isFavorite: Boolean = false,
+        collectionId: Long? = null
+    ): Document = withContext(Dispatchers.IO) {
+        val finalCover = saveCoverFromUri(customCoverUri) ?: coverPath
+        val now = System.currentTimeMillis()
+        val doc = Document(
+            title = title.ifBlank { "Untitled Document" },
+            content = content,
+            sourceUrl = sourceUrl?.ifBlank { null },
+            coverPath = finalCover,
+            contentLength = content.length,
+            isFavorite = isFavorite,
+            addedDate = now,
+            lastReadTime = now
+        )
+        val generatedId = documentRepository.insert(doc)
+        val createdDoc = doc.copy(id = generatedId)
+        
+        if (collectionId != null) {
+            documentRepository.addDocumentToCollection(generatedId, collectionId)
+        }
+        
+        if (chapters.isNotEmpty()) {
+            val dbChapters = chapters.map { candidate ->
+                Chapter(
+                    documentId = generatedId,
+                    title = candidate.title,
+                    startCharOffset = candidate.charOffset
+                )
+            }
+            documentRepository.insertChapters(dbChapters)
+        }
+
+        // Pre-warm speech sentence cache on background thread for instant playback
+        if (content.isNotBlank()) {
+            val parsedSentences = withContext(Dispatchers.Default) {
+                DocumentParser.parse(content)
+            }
+            putCachedSentences(createdDoc, parsedSentences)
+        }
+        
+        if (autoSelect) {
+            withContext(Dispatchers.Main) {
                 selectDocument(createdDoc)
             }
+        }
+
+        createdDoc
+    }
+
+    fun addNewBook(
+        title: String,
+        content: String,
+        sourceUrl: String?,
+        coverPath: String? = null,
+        chapters: List<ChapterCandidate> = emptyList(),
+        autoSelect: Boolean = false,
+        customCoverUri: android.net.Uri? = null,
+        isFavorite: Boolean = false,
+        collectionId: Long? = null
+    ) {
+        viewModelScope.launch {
+            insertDocumentInternal(
+                title = title,
+                content = content,
+                sourceUrl = sourceUrl,
+                coverPath = coverPath,
+                chapters = chapters,
+                autoSelect = autoSelect,
+                customCoverUri = customCoverUri,
+                isFavorite = isFavorite,
+                collectionId = collectionId
+            )
         }
     }
 
@@ -628,11 +753,14 @@ Here is what this app can do:
         }
     }
 
-    fun createCollection(name: String, andAddDocumentId: Long? = null) {
+    fun createCollection(name: String, andAddDocumentId: Long? = null, onCreated: ((Long) -> Unit)? = null) {
         viewModelScope.launch {
-            val colId = documentRepository.insertCollection(CollectionEntity(name = name))
+            val colId = documentRepository.insertCollection(CollectionEntity(name = name.trim()))
             if (andAddDocumentId != null) {
                 documentRepository.addDocumentToCollection(andAddDocumentId, colId)
+            }
+            withContext(Dispatchers.Main) {
+                onCreated?.invoke(colId)
             }
         }
     }
@@ -694,16 +822,22 @@ Here is what this app can do:
 
             // Real System Specs Check
             val cores = Runtime.getRuntime().availableProcessors()
-            // Estimate RAM size in GigaBytes
-            val maxMemory = Runtime.getRuntime().maxMemory()
-            val availableMemoryGb = maxMemory / (1024.0 * 1024.0 * 1024.0)
             
-            // Adjust to get realistic total RAM values for Android devices
+            // Query actual device physical RAM
+            val actManager = getApplication<Application>().getSystemService(android.content.Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+            val memInfo = android.app.ActivityManager.MemoryInfo()
+            actManager?.getMemoryInfo(memInfo)
+            val physicalRamBytes = memInfo.totalMem
+            val rawRamGb = if (physicalRamBytes > 0) physicalRamBytes.toDouble() / (1024.0 * 1024.0 * 1024.0) else 4.0
+            
             val estimatedRamGb = when {
-                availableMemoryGb < 1.0 -> 2.0
-                availableMemoryGb < 2.0 -> 4.0
-                availableMemoryGb < 3.5 -> 6.0
-                else -> 8.0
+                rawRamGb <= 2.5 -> 2.0
+                rawRamGb <= 3.5 -> 3.0
+                rawRamGb <= 4.5 -> 4.0
+                rawRamGb <= 6.5 -> 6.0
+                rawRamGb <= 8.5 -> 8.0
+                rawRamGb <= 12.5 -> 12.0
+                else -> 16.0
             }
 
             val npuDetected = Build.HARDWARE.lowercase().contains("qcom") || 
@@ -738,9 +872,23 @@ Here is what this app can do:
         _benchmarkProgress.value = null
     }
 
-    fun importDocumentFromUrl(url: String, customTitle: String?) {
+    fun importDocumentFromUrl(
+        url: String,
+        customTitle: String? = null,
+        customCoverUri: android.net.Uri? = null,
+        isFavorite: Boolean = false,
+        collectionId: Long? = null
+    ) {
         viewModelScope.launch {
             _isImporting.value = true
+            _importProgress.value = ImportTaskProgress(
+                isImporting = true,
+                currentItemIndex = 1,
+                totalItems = 1,
+                currentTitle = customTitle ?: url,
+                currentStage = "Connecting to web page...",
+                progressFraction = 0.15f
+            )
             try {
                 withContext(Dispatchers.IO) {
                     val cleanUrl = if (!url.startsWith("http://") && !url.startsWith("https://")) {
@@ -752,7 +900,12 @@ Here is what this app can do:
                         .timeout(12000)
                         .get()
 
-                    val parsedTitle = if (!customTitle.isNullOrBlank()) customTitle else doc.title()
+                    _importProgress.value = _importProgress.value.copy(
+                        currentStage = "Extracting article text...",
+                        progressFraction = 0.50f
+                    )
+
+                    val parsedTitle = if (!customTitle.isNullOrBlank()) customTitle else doc.title().ifBlank { cleanUrl }
 
                     // Strip scripts, headers, menus
                     doc.select("script, style, header, footer, nav, aside, noscript, iframe").remove()
@@ -765,10 +918,35 @@ Here is what this app can do:
                     }
 
                     if (textToUse.isNotBlank()) {
+                        _importProgress.value = _importProgress.value.copy(
+                            currentStage = "Analyzing speech structure & chapters...",
+                            progressFraction = 0.75f
+                        )
                         val chapters = ChapterExtractor.extractChaptersFromText(textToUse)
-                        withContext(Dispatchers.Main) {
-                            addNewBook(parsedTitle, textToUse, cleanUrl, null, chapters)
-                        }
+                        val customCoverPath = saveCoverFromUri(customCoverUri)
+
+                        _importProgress.value = _importProgress.value.copy(
+                            currentStage = "Saving to library...",
+                            progressFraction = 0.90f
+                        )
+                        insertDocumentInternal(
+                            title = parsedTitle,
+                            content = textToUse,
+                            sourceUrl = cleanUrl,
+                            coverPath = customCoverPath,
+                            chapters = chapters,
+                            autoSelect = false,
+                            customCoverUri = null,
+                            isFavorite = isFavorite,
+                            collectionId = collectionId
+                        )
+                        _importProgress.value = _importProgress.value.copy(
+                            currentStage = "Complete!",
+                            progressFraction = 1.0f
+                        )
+                        delay(150)
+                    } else {
+                        throw IllegalArgumentException("No readable article content found at this URL.")
                     }
                 }
             } catch (e: Exception) {
@@ -776,103 +954,217 @@ Here is what this app can do:
                 _importError.value = "Failed to import from URL: ${e.localizedMessage ?: "Unknown error"}"
             } finally {
                 _isImporting.value = false
+                _importProgress.value = ImportTaskProgress()
             }
         }
     }
 
-    fun importDocumentFromUri(uri: android.net.Uri, customTitle: String?, autoSelect: Boolean = true) {
+    private suspend fun processDocumentFromUri(
+        uri: android.net.Uri,
+        customTitle: String?,
+        customCoverUri: android.net.Uri? = null,
+        isFavorite: Boolean = false,
+        collectionId: Long? = null,
+        onProgress: (stage: String, stageFraction: Float) -> Unit
+    ): Document? = withContext(Dispatchers.IO) {
+        val context = getApplication<Application>()
+        val contentResolver = context.contentResolver
+
+        onProgress("Reading file...", 0.10f)
+
+        var fileName = "Imported Document"
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (nameIndex != -1 && cursor.moveToFirst()) {
+                fileName = cursor.getString(nameIndex)
+            }
+        }
+
+        val tempFile = File(context.cacheDir, "temp_upload_${System.currentTimeMillis()}_${(0..9999).random()}")
+        try {
+            contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(tempFile).use { output ->
+                    input.copyTo(output)
+                }
+            }
+
+            val rawTitle = if (!customTitle.isNullOrBlank()) customTitle else {
+                fileName.substringBeforeLast(".")
+            }
+            val titleToUse = cleanBookTitle(rawTitle)
+
+            var isPdf = fileName.endsWith(".pdf", ignoreCase = true) || 
+                        (contentResolver.getType(uri) ?: "").contains("pdf", ignoreCase = true)
+            
+            var isDocx = fileName.endsWith(".docx", ignoreCase = true) || 
+                         (contentResolver.getType(uri) ?: "").contains("vnd.openxmlformats-officedocument", ignoreCase = true)
+
+            var isEpub = fileName.endsWith(".epub", ignoreCase = true) || 
+                         (contentResolver.getType(uri) ?: "").contains("epub", ignoreCase = true)
+
+            var isHtml = fileName.endsWith(".html", ignoreCase = true) || 
+                         fileName.endsWith(".htm", ignoreCase = true) || 
+                         fileName.endsWith(".xhtml", ignoreCase = true) || 
+                         (contentResolver.getType(uri) ?: "").contains("html", ignoreCase = true)
+
+            // ZIP-based structure sniffing fallback for ambiguous file naming or generic MIME types
+            if (!isPdf && !isDocx && !isEpub && !isHtml) {
+                try {
+                    java.util.zip.ZipFile(tempFile).use { zip ->
+                        if (zip.getEntry("word/document.xml") != null) {
+                            isDocx = true
+                        } else if (zip.getEntry("META-INF/container.xml") != null || 
+                                   zip.entries().asSequence().any { it.name.endsWith(".epub", ignoreCase = true) }) {
+                            isEpub = true
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+
+            onProgress("Extracting text and structure...", 0.35f)
+
+            val extracted: ExtractedDocument
+            var coverPath: String? = null
+
+            if (isPdf) {
+                extracted = extractTextFromPdf(tempFile)
+                coverPath = generatePdfCover(tempFile)
+            } else if (isDocx) {
+                extracted = extractTextFromDocx(tempFile)
+            } else if (isEpub) {
+                extracted = extractTextFromEpub(tempFile)
+                coverPath = extractEpubCover(tempFile)
+            } else if (isHtml) {
+                extracted = extractTextFromHtml(tempFile)
+            } else {
+                extracted = extractTextFromTxt(tempFile)
+            }
+
+            if (extracted.content.isBlank()) {
+                throw IllegalArgumentException("No readable text found in $fileName")
+            }
+
+            onProgress("Analyzing speech structure & chapters...", 0.65f)
+
+            val customCoverPath = saveCoverFromUri(customCoverUri)
+            val finalCoverPath = customCoverPath ?: coverPath
+
+            onProgress("Saving to library...", 0.85f)
+
+            val createdDoc = insertDocumentInternal(
+                title = titleToUse,
+                content = extracted.content,
+                sourceUrl = fileName,
+                coverPath = finalCoverPath,
+                chapters = extracted.chapters,
+                autoSelect = false,
+                customCoverUri = null,
+                isFavorite = isFavorite,
+                collectionId = collectionId
+            )
+
+            onProgress("Complete!", 1.00f)
+            createdDoc
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    fun importDocumentFromUri(
+        uri: android.net.Uri,
+        customTitle: String?,
+        autoSelect: Boolean = false,
+        customCoverUri: android.net.Uri? = null,
+        isFavorite: Boolean = false,
+        collectionId: Long? = null
+    ) {
         viewModelScope.launch {
             _isImporting.value = true
+            _importProgress.value = ImportTaskProgress(
+                isImporting = true,
+                currentItemIndex = 1,
+                totalItems = 1,
+                currentTitle = customTitle ?: "Document",
+                currentStage = "Reading file...",
+                progressFraction = 0.05f
+            )
             try {
-                withContext(Dispatchers.IO) {
-                    val context = getApplication<Application>()
-                    val contentResolver = context.contentResolver
-                    
-                    var fileName = "Imported Document"
-                    contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                        val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                        if (nameIndex != -1 && cursor.moveToFirst()) {
-                            fileName = cursor.getString(nameIndex)
-                        }
+                val doc = processDocumentFromUri(
+                    uri = uri,
+                    customTitle = customTitle,
+                    customCoverUri = customCoverUri,
+                    isFavorite = isFavorite,
+                    collectionId = collectionId,
+                    onProgress = { stage, frac ->
+                        _importProgress.value = _importProgress.value.copy(
+                            currentStage = stage,
+                            progressFraction = frac
+                        )
                     }
-
-                    val tempFile = File(context.cacheDir, "temp_upload_${System.currentTimeMillis()}")
-                    try {
-                        contentResolver.openInputStream(uri)?.use { input ->
-                            FileOutputStream(tempFile).use { output ->
-                                input.copyTo(output)
-                            }
-                        }
-
-                        val rawTitle = if (!customTitle.isNullOrBlank()) customTitle else {
-                            fileName.substringBeforeLast(".")
-                        }
-                        val titleToUse = cleanBookTitle(rawTitle)
-
-                        var isPdf = fileName.endsWith(".pdf", ignoreCase = true) || 
-                                    (contentResolver.getType(uri) ?: "").contains("pdf", ignoreCase = true)
-                        
-                        var isDocx = fileName.endsWith(".docx", ignoreCase = true) || 
-                                     (contentResolver.getType(uri) ?: "").contains("vnd.openxmlformats-officedocument", ignoreCase = true)
-
-                        var isEpub = fileName.endsWith(".epub", ignoreCase = true) || 
-                                     (contentResolver.getType(uri) ?: "").contains("epub", ignoreCase = true)
-
-                        var isHtml = fileName.endsWith(".html", ignoreCase = true) || 
-                                     fileName.endsWith(".htm", ignoreCase = true) || 
-                                     fileName.endsWith(".xhtml", ignoreCase = true) || 
-                                     (contentResolver.getType(uri) ?: "").contains("html", ignoreCase = true)
-
-                        // ZIP-based structure sniffing fallback for ambiguous file naming or generic MIME types
-                        if (!isPdf && !isDocx && !isEpub && !isHtml) {
-                            try {
-                                java.util.zip.ZipFile(tempFile).use { zip ->
-                                    if (zip.getEntry("word/document.xml") != null) {
-                                        isDocx = true
-                                    } else if (zip.getEntry("META-INF/container.xml") != null || 
-                                               zip.entries().asSequence().any { it.name.endsWith(".epub", ignoreCase = true) }) {
-                                        isEpub = true
-                                    }
-                                }
-                            } catch (e: Exception) {
-                                // Not a valid ZIP file, fallback to plain text
-                            }
-                        }
-
-                        val extracted: ExtractedDocument
-                        var coverPath: String? = null
-
-                        if (isPdf) {
-                            extracted = extractTextFromPdf(tempFile)
-                            coverPath = generatePdfCover(tempFile)
-                        } else if (isDocx) {
-                            extracted = extractTextFromDocx(tempFile)
-                        } else if (isEpub) {
-                            extracted = extractTextFromEpub(tempFile)
-                            coverPath = extractEpubCover(tempFile)
-                        } else if (isHtml) {
-                            extracted = extractTextFromHtml(tempFile)
-                        } else {
-                            extracted = extractTextFromTxt(tempFile)
-                        }
-
-                        if (extracted.content.isNotBlank()) {
-                            withContext(Dispatchers.Main) {
-                                addNewBook(titleToUse, extracted.content, fileName, coverPath, extracted.chapters, autoSelect)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                        _importError.value = "Failed to process imported file: ${e.localizedMessage ?: "Unknown error"}"
-                    } finally {
-                        tempFile.delete()
-                    }
+                )
+                delay(150)
+                if (autoSelect && doc != null) {
+                    selectDocument(doc)
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                _importError.value = "Failed to read imported file: ${e.localizedMessage ?: "Unknown error"}"
+                _importError.value = "Failed to import file: ${e.localizedMessage ?: "Unknown error"}"
             } finally {
                 _isImporting.value = false
+                _importProgress.value = ImportTaskProgress()
+            }
+        }
+    }
+
+    fun importDocumentsBatch(drafts: List<BatchImportItem>) {
+        if (drafts.isEmpty()) return
+        viewModelScope.launch {
+            _isImporting.value = true
+            val total = drafts.size
+            _importProgress.value = ImportTaskProgress(
+                isImporting = true,
+                currentItemIndex = 1,
+                totalItems = total,
+                currentTitle = drafts.first().title ?: "Document 1",
+                currentStage = "Starting batch import...",
+                progressFraction = 0f
+            )
+            try {
+                for ((index, draft) in drafts.withIndex()) {
+                    val itemNumber = index + 1
+                    val itemTitle = draft.title ?: "Document $itemNumber"
+                    _importProgress.value = ImportTaskProgress(
+                        isImporting = true,
+                        currentItemIndex = itemNumber,
+                        totalItems = total,
+                        currentTitle = itemTitle,
+                        currentStage = "Reading file...",
+                        progressFraction = index.toFloat() / total
+                    )
+                    try {
+                        processDocumentFromUri(
+                            uri = draft.uri,
+                            customTitle = draft.title,
+                            customCoverUri = draft.customCoverUri,
+                            isFavorite = draft.isFavorite,
+                            collectionId = draft.collectionId,
+                            onProgress = { stage, stageFrac ->
+                                val overallFrac = (index + stageFrac) / total
+                                _importProgress.value = _importProgress.value.copy(
+                                    currentStage = stage,
+                                    progressFraction = overallFrac
+                                )
+                            }
+                        )
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        _importError.value = "Failed to import '$itemTitle': ${e.localizedMessage ?: "Unknown error"}"
+                    }
+                }
+                delay(200)
+            } finally {
+                _isImporting.value = false
+                _importProgress.value = ImportTaskProgress()
             }
         }
     }
@@ -896,7 +1188,12 @@ Here is what this app can do:
 
                 if (builder.isNotEmpty()) {
                     val lastChar = builder.lastOrNull()
-                    if (lastChar == '-') {
+                    val isHyphenated = lastChar == '-' &&
+                            builder.length >= 2 &&
+                            builder[builder.length - 2].isLetterOrDigit() &&
+                            currentLine.firstOrNull()?.isLetterOrDigit() == true
+
+                    if (isHyphenated) {
                         builder.setLength(builder.length - 1)
                         builder.append(currentLine)
                     } else {
@@ -1035,13 +1332,15 @@ Here is what this app can do:
                     }
                 }
                 
-                // Fallback to alphabetical sorting if OPF spine parsing yields no files
+                // Fallback to natural alphabetical sorting if OPF spine parsing yields no files
                 var textEntries = resolvedEntries
                 if (textEntries.isEmpty()) {
                     textEntries = entries.filter { entry ->
                         val name = entry.name.lowercase()
                         !entry.isDirectory && (name.endsWith(".xhtml") || name.endsWith(".html") || name.endsWith(".htm"))
-                    }.sortedBy { it.name }.toMutableList()
+                    }.sortedWith(Comparator { a, b ->
+                        naturalCompare(a.name.lowercase(), b.name.lowercase())
+                    }).toMutableList()
                 }
 
                 if (textEntries.isEmpty()) return@withContext ExtractedDocument("", emptyList())
@@ -1475,7 +1774,11 @@ Here is what this app can do:
 
     private suspend fun warmSentenceCache(documents: List<Document>) {
         documents.forEach { summaryDoc ->
-            val fullDoc = documentRepository.getDocumentById(summaryDoc.id) ?: return@forEach
+            val fullDoc = try {
+                documentRepository.getDocumentById(summaryDoc.id)
+            } catch (e: Exception) {
+                null
+            } ?: return@forEach
             if (getCachedSentences(fullDoc) == null && fullDoc.content.isNotBlank()) {
                 val parsed = withContext(Dispatchers.Default) {
                     DocumentParser.parse(fullDoc.content)
@@ -1483,5 +1786,12 @@ Here is what this app can do:
                 putCachedSentences(fullDoc, parsed)
             }
         }
+    }
+
+    private fun naturalCompare(s1: String, s2: String): Int {
+        val numRegex = Regex("\\d+")
+        val p1 = numRegex.replace(s1) { it.value.padStart(10, '0') }
+        val p2 = numRegex.replace(s2) { it.value.padStart(10, '0') }
+        return p1.compareTo(p2)
     }
 }

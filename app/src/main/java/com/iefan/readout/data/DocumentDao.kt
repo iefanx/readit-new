@@ -14,6 +14,15 @@ interface DocumentDao {
     @Query("SELECT * FROM documents WHERE id = :id LIMIT 1")
     suspend fun getDocumentById(id: Long): Document?
 
+    @Query("SELECT id, title, '' as content, sourceUrl, addedDate, playbackPosition, selectedModelTier, playbackSpeed, coverPath, lastReadTime, isFavorite, contentLength FROM documents WHERE id = :id LIMIT 1")
+    suspend fun getDocumentMetadataById(id: Long): Document?
+
+    @Query("SELECT length(content) FROM documents WHERE id = :id")
+    suspend fun getDocumentContentLength(id: Long): Long?
+
+    @Query("SELECT substr(content, :offset, :length) FROM documents WHERE id = :id")
+    suspend fun getDocumentContentChunk(id: Long, offset: Int, length: Int): String?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertDocument(document: Document): Long
 

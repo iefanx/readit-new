@@ -32,12 +32,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import com.iefan.readout.tts.VoiceInfo
 import com.iefan.readout.tts.VoiceStatus
 
 @Composable
 fun SettingsDialog(
+    initialScreen: Int = 0,
     selectedVoiceId: String,
     availableVoices: List<VoiceInfo>,
     onSelectVoice: (String) -> Unit,
@@ -50,18 +53,34 @@ fun SettingsDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    var currentScreen by remember { mutableStateOf(0) } // 0 = Main Settings, 1 = Voice Selection, 2 = Translation, 3 = Theme Color
+    var currentScreen by remember(initialScreen) { mutableIntStateOf(initialScreen) } // 0 = Main Settings, 1 = Voice Selection, 2 = Translation, 3 = Theme Color
+    var translationSearchQuery by remember { mutableStateOf("") }
 
     val translationLanguages = listOf(
-        Pair("none", "Original Text"),
+        Pair("none", "Original Text (No Translation)"),
+        Pair("en", "English"),
         Pair("es", "Spanish"),
         Pair("fr", "French"),
         Pair("de", "German"),
         Pair("it", "Italian"),
+        Pair("pt", "Portuguese"),
+        Pair("ru", "Russian"),
         Pair("hi", "Hindi"),
-        Pair("zh", "Chinese"),
+        Pair("bn", "Bengali"),
+        Pair("zh", "Chinese (Simplified)"),
         Pair("ja", "Japanese"),
-        Pair("ko", "Korean")
+        Pair("ko", "Korean"),
+        Pair("ar", "Arabic"),
+        Pair("nl", "Dutch"),
+        Pair("tr", "Turkish"),
+        Pair("pl", "Polish"),
+        Pair("vi", "Vietnamese"),
+        Pair("id", "Indonesian"),
+        Pair("uk", "Ukrainian"),
+        Pair("ur", "Urdu"),
+        Pair("ta", "Tamil"),
+        Pair("te", "Telugu"),
+        Pair("mr", "Marathi")
     )
 
     val currentVoiceName = remember(selectedVoiceId, availableVoices) {
@@ -76,13 +95,17 @@ fun SettingsDialog(
         translationLanguages.firstOrNull { it.first == translationTargetLang }?.second ?: "Original Text"
     }
 
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
         Card(
-            shape = RoundedCornerShape(24.dp),
+            shape = RoundedCornerShape(28.dp),
             modifier = Modifier
-                .fillMaxWidth()
+                .fillMaxWidth(0.92f)
+                .heightIn(max = 680.dp)
                 .padding(4.dp)
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(24.dp)),
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(28.dp)),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
         ) {
             Column(
@@ -91,86 +114,91 @@ fun SettingsDialog(
                     .fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Header depending on current screen
-                when (currentScreen) {
-                    0 -> {
-                        Icon(
-                            imageVector = Icons.Default.Tune,
-                            contentDescription = "Settings",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(36.dp)
-                        )
-                        Spacer(modifier = Modifier.height(14.dp))
-                        Text(
-                            text = "Readout Settings",
-                            style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                    }
-                    1 -> {
+                // Compact Modern Header
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (currentScreen == 0) {
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            IconButton(onClick = { currentScreen = 0 }) {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(RoundedCornerShape(9.dp))
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                                contentAlignment = Alignment.Center
+                            ) {
                                 Icon(
-                                    imageVector = Icons.Default.ArrowBack,
-                                    contentDescription = "Back to settings"
+                                    imageVector = Icons.Default.Tune,
+                                    contentDescription = "Settings",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
                                 )
                             }
-                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Voice Persona",
-                                style = MaterialTheme.typography.titleLarge,
+                                text = "Settings",
+                                style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                         }
-                    }
-                    2 -> {
+                    } else {
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            IconButton(onClick = { currentScreen = 0 }) {
-                                Icon(
-                                    imageVector = Icons.Default.ArrowBack,
-                                    contentDescription = "Back to settings"
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Translation",
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                    }
-                    3 -> {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            IconButton(onClick = { currentScreen = 0 }) {
+                            IconButton(
+                                onClick = { currentScreen = 0 },
+                                modifier = Modifier.size(32.dp)
+                            ) {
                                 Icon(
                                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                    contentDescription = "Back to settings"
+                                    contentDescription = "Back to settings",
+                                    tint = MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.size(20.dp)
                                 )
                             }
-                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Theme Accent",
-                                style = MaterialTheme.typography.titleLarge,
+                                text = when (currentScreen) {
+                                    1 -> "Voice Persona"
+                                    2 -> "Translation"
+                                    else -> "Theme Accent"
+                                },
+                                style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                         }
+                    }
+
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(16.dp)
+                        )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(20.dp))
+                HorizontalDivider(
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f),
+                    thickness = 0.5.dp
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
 
                 // Content depending on current screen
                 when (currentScreen) {
@@ -369,7 +397,7 @@ fun SettingsDialog(
                         LazyColumn(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(max = 320.dp),
+                                .heightIn(max = 340.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             // 1. Smart Autoselect Option
@@ -411,7 +439,7 @@ fun SettingsDialog(
                                         )
                                         Spacer(modifier = Modifier.height(2.dp))
                                         Text(
-                                            text = "Chooses Voice A (Network) if online, falling back to Voice A (Male) offline.",
+                                            text = "Intelligently selects the highest-scoring Neural or Wavenet voice online, falling back to enhanced offline models.",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             lineHeight = 14.sp
@@ -523,43 +551,61 @@ fun SettingsDialog(
                         Spacer(modifier = Modifier.height(16.dp))
 
                         // Direct System Install Link Button
-                        Button(
+                        OutlinedButton(
                             onClick = {
                                 try {
                                     val intent = Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA)
                                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                     context.startActivity(intent)
                                 } catch (e: Exception) {
-                                    Log.e("SettingsDialog", "Failed to launch TTS settings", e)
+                                    try {
+                                        val fallback = Intent("com.android.settings.TTS_SETTINGS")
+                                        fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        context.startActivity(fallback)
+                                    } catch (err: Exception) {
+                                        Log.e("SettingsDialog", "Failed to launch TTS settings", err)
+                                    }
                                 }
                             },
                             modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = MaterialTheme.colorScheme.primary
                             ),
-                            shape = RoundedCornerShape(12.dp)
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp,
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+                            ),
+                            shape = RoundedCornerShape(14.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Download,
                                 contentDescription = "Install Voices",
-                                modifier = Modifier.size(18.dp)
+                                modifier = Modifier.size(17.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Manage Offline Voices in Settings",
+                                text = "Install Offline Voices & Language Packs",
                                 style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp
                             )
                         }
                     }
 
                     2 -> {
+                        val filteredTranslationLanguages = remember(translationLanguages, translationSearchQuery) {
+                            if (translationSearchQuery.isBlank()) translationLanguages
+                            else translationLanguages.filter {
+                                it.second.contains(translationSearchQuery, ignoreCase = true) ||
+                                it.first.contains(translationSearchQuery, ignoreCase = true)
+                            }
+                        }
+
                         // Info banner
                         Surface(
                             shape = RoundedCornerShape(12.dp),
                             color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f),
-                            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)
                         ) {
                             Row(
                                 modifier = Modifier.padding(12.dp),
@@ -582,13 +628,34 @@ fun SettingsDialog(
                             }
                         }
 
+                        OutlinedTextField(
+                            value = translationSearchQuery,
+                            onValueChange = { translationSearchQuery = it },
+                            placeholder = { Text("Search languages...", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                            singleLine = true,
+                            leadingIcon = {
+                                Icon(Icons.Default.Search, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            },
+                            trailingIcon = {
+                                if (translationSearchQuery.isNotEmpty()) {
+                                    IconButton(onClick = { translationSearchQuery = "" }) {
+                                        Icon(Icons.Default.Close, contentDescription = "Clear", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+                                    }
+                                }
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 10.dp)
+                        )
+
                         LazyColumn(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(max = 320.dp),
+                                .heightIn(max = 350.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            items(translationLanguages) { (langCode, langName) ->
+                            items(filteredTranslationLanguages) { (langCode, langName) ->
                                 val isSelected = translationTargetLang == langCode
                                 
                                 Row(
@@ -785,10 +852,15 @@ fun SettingsDialog(
                 Spacer(modifier = Modifier.height(16.dp))
 
                 TextButton(
-                    onClick = onDismiss,
+                    onClick = {
+                        if (currentScreen != 0) currentScreen = 0 else onDismiss()
+                    },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(if (currentScreen != 0) "Back" else "Close")
+                    Text(
+                        text = if (currentScreen != 0) "Back to Settings" else "Done",
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
             }
         }

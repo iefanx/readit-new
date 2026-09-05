@@ -18,15 +18,44 @@ data class SpeechSentence(
 )
 
 object DocumentParser {
+    private val ABBREVIATIONS = setOf(
+        "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "vs", "e.g", "i.e", "etc", "st",
+        "approx", "inc", "corp", "vol", "p", "pp", "dept", "est", "fig", "no", "al", "gen", "rep", "sen", "gov",
+        "u.s", "a.m", "p.m", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec"
+    )
+
+    private fun isAbbreviationEnd(text: String): Boolean {
+        val trimmed = text.trimEnd()
+        val withoutQuote = trimmed.trimEnd('"', '\'', '”', '’', '»', ')', ']')
+        if (!withoutQuote.endsWith(".")) return false
+        if (withoutQuote.endsWith("e.g.", ignoreCase = true) || 
+            withoutQuote.endsWith("i.e.", ignoreCase = true) || 
+            withoutQuote.endsWith("et al.", ignoreCase = true) ||
+            withoutQuote.endsWith("u.s.", ignoreCase = true) ||
+            withoutQuote.endsWith("a.m.", ignoreCase = true) ||
+            withoutQuote.endsWith("p.m.", ignoreCase = true)) {
+            return true
+        }
+        val lastWord = withoutQuote.substringBeforeLast('.')
+            .substringAfterLast(' ')
+            .trim('"', '\'', '“', '‘', '(', '[', '{', '«')
+            .lowercase()
+        // Single letter initial (e.g. J. K. Rowling, John F. Kennedy)
+        if (lastWord.length == 1 && lastWord[0].isLetter()) {
+            return true
+        }
+        return ABBREVIATIONS.contains(lastWord)
+    }
+
     fun parse(rawText: String): List<SpeechSentence> {
         val text = TextCleaner.clean(rawText)
         val sentences = mutableListOf<SpeechSentence>()
         if (text.isBlank()) return sentences
 
         // An intelligent regex-based sentence boundary detector that does not split on decimal numbers (e.g. 13.8)
-        // Matches periods only if followed by whitespace or end of string, and question/exclamation marks or newlines
-        val sentenceRegex = Regex("((?:[^.!?\\n]|\\.(?!\\s|\\$))+[.!?]*\\s*)")
-        val wordRegex = Regex("[\\w\\d']+")
+        // Matches punctuation and closing quotes/brackets attached to sentence ends
+        val sentenceRegex = Regex("((?:[^.!?\\n]|\\.(?!\\s|\\$))+[.!?]*[\"”’')\\]]*\\s*)")
+        val wordRegex = Regex("[\\p{L}\\p{M}\\p{N}']+")
 
         var sentenceIndex = 0
         var paragraphIndex = 0
@@ -51,17 +80,35 @@ object DocumentParser {
 
                 if (hasContent) {
                     val paragraphText = text.substring(start, end)
-                    val matches = sentenceRegex.findAll(paragraphText)
+                    val rawMatches = sentenceRegex.findAll(paragraphText).toList()
                     var addedSentenceInParagraph = false
 
-                    for (match in matches) {
-                        val sentenceText = match.value
+                    // Merge abbreviations so they don't break sentences awkwardly
+                    val mergedMatches = mutableListOf<Pair<IntRange, String>>()
+                    var matchIdx = 0
+                    while (matchIdx < rawMatches.size) {
+                        val m = rawMatches[matchIdx]
+                        var currentRange = m.range
+                        var currentText = m.value
+
+                        while (matchIdx + 1 < rawMatches.size && isAbbreviationEnd(currentText)) {
+                            val nextM = rawMatches[matchIdx + 1]
+                            currentRange = currentRange.first..nextM.range.last
+                            currentText += nextM.value
+                            matchIdx++
+                        }
+                        mergedMatches.add(currentRange to currentText)
+                        matchIdx++
+                    }
+
+                    for (match in mergedMatches) {
+                        val sentenceText = match.second
                         if (sentenceText.trim().isEmpty()) continue
 
-                        val sentenceStart = start + match.range.first
-                        val sentenceEnd = start + match.range.last + 1
+                        val sentenceStart = start + match.first.first
+                        val sentenceEnd = start + match.first.last + 1
 
-                        // Now, parse individual words within this sentence
+                        // Parse individual words within this sentence
                         val words = mutableListOf<SpeechWord>()
                         val wordMatches = wordRegex.findAll(sentenceText)
 

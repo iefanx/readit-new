@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Toc
@@ -67,16 +68,16 @@ fun TableOfContentsSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
-        containerColor = Color(0xFF141416),
+        containerColor = Color(0xFF101012),
         tonalElevation = 0.dp,
         dragHandle = {
             Box(
                 modifier = Modifier
-                    .padding(top = 14.dp, bottom = 6.dp)
+                    .padding(top = 12.dp, bottom = 6.dp)
                     .width(36.dp)
                     .height(4.dp)
                     .clip(RoundedCornerShape(2.dp))
-                    .background(Color(0xFF3A3A3C))
+                    .background(Color(0xFF38383C))
             )
         }
     ) {
@@ -112,7 +113,7 @@ fun TableOfContentsSheet(
                         modifier = Modifier.weight(1f)
                     )
                 }
-                HorizontalDivider(color = Color(0xFF2C2C2E), thickness = 0.5.dp)
+                HorizontalDivider(color = Color(0xFF242428), thickness = 0.5.dp)
             } else {
                 // No chapters — show a fixed Bookmarks header
                 Row(
@@ -144,7 +145,7 @@ fun TableOfContentsSheet(
                         )
                     }
                 }
-                HorizontalDivider(color = Color(0xFF2C2C2E), thickness = 0.5.dp)
+                HorizontalDivider(color = Color(0xFF242428), thickness = 0.5.dp)
             }
 
             // ── Content ──────────────────────────────────────────────────────
@@ -226,12 +227,12 @@ private fun ChaptersContent(
                         .clip(RoundedCornerShape(14.dp))
                         .background(
                             if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
-                            else Color(0xFF1C1C1E)
+                            else Color(0xFF161619)
                         )
                         .border(
                             1.dp,
-                            if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
-                            else Color(0xFF2C2C2E),
+                            if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+                            else Color(0xFF24242A),
                             RoundedCornerShape(14.dp)
                         )
                         .clickable { onChapterSelected(chapter) }
@@ -245,8 +246,8 @@ private fun ChaptersContent(
                             .size(28.dp)
                             .clip(RoundedCornerShape(8.dp))
                             .background(
-                                if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
-                                else Color(0xFF2C2C2E)
+                                if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+                                else Color(0xFF24242A)
                             ),
                         contentAlignment = Alignment.Center
                     ) {
@@ -269,8 +270,8 @@ private fun ChaptersContent(
                     if (isSelected) {
                         Box(
                             modifier = Modifier
-                                .size(7.dp)
-                                .clip(RoundedCornerShape(50))
+                                .size(8.dp)
+                                .clip(CircleShape)
                                 .background(MaterialTheme.colorScheme.primary)
                         )
                     }
@@ -325,8 +326,8 @@ private fun BookmarkRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
-            .background(Color(0xFF1C1C1E))
-            .border(1.dp, Color(0xFF2C2C2E), RoundedCornerShape(14.dp))
+            .background(Color(0xFF161619))
+            .border(1.dp, Color(0xFF24242A), RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
             .padding(start = 14.dp, end = 8.dp, top = 12.dp, bottom = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -361,7 +362,7 @@ private fun BookmarkRow(
             Icon(
                 imageVector = Icons.Default.Delete,
                 contentDescription = "Delete bookmark",
-                tint = Color(0xFF48484A),
+                tint = Color(0xFF71717A),
                 modifier = Modifier.size(18.dp)
             )
         }
@@ -383,12 +384,12 @@ private fun TocTabChip(
         modifier = modifier
             .clip(RoundedCornerShape(12.dp))
             .background(
-                if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
-                else Color(0xFF1C1C1E)
+                if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                else Color(0xFF161619)
             )
             .border(
                 1.dp,
-                if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f) else Color(0xFF2C2C2E),
+                if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f) else Color(0xFF24242A),
                 RoundedCornerShape(12.dp)
             )
             .clickable(onClick = onClick)
@@ -415,7 +416,7 @@ private fun TocTabChip(
                     .clip(RoundedCornerShape(6.dp))
                     .background(
                         if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
-                        else Color(0xFF2C2C2E)
+                        else Color(0xFF24242A)
                     )
                     .padding(horizontal = 6.dp, vertical = 2.dp)
             ) {

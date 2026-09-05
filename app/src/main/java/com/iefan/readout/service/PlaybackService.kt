@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.graphics.drawable.Icon
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -38,7 +39,12 @@ class PlaybackService : Service() {
 
     private fun registerNoisyReceiver() {
         if (!isNoisyReceiverRegistered) {
-            registerReceiver(noisyReceiver, android.content.IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY))
+            val filter = android.content.IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(noisyReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(noisyReceiver, filter)
+            }
             isNoisyReceiverRegistered = true
         }
     }
@@ -91,14 +97,21 @@ class PlaybackService : Service() {
                 }
 
                 override fun onSeekTo(pos: Long) {
-                    Log.d("PlaybackService", "MediaSession: onSeekTo $pos")
-                    ReadoutTtsEngine.instance?.seekToCharacter(pos.toInt())
+                    Log.d("PlaybackService", "MediaSession: onSeekTo $pos ms")
+                    val engine = ReadoutTtsEngine.instance ?: return
+                    val totalChars = engine.totalCharacters
+                    if (totalChars > 0) {
+                        val durationMs = (totalChars.toLong() * 80L).coerceAtLeast(1000L)
+                        val charTarget = ((pos.toDouble() / durationMs.toDouble()) * totalChars).toInt().coerceIn(0, totalChars)
+                        engine.seekToCharacter(charTarget)
+                    }
                 }
             })
             isActive = true
         }
 
         createNotificationChannel()
+        registerNoisyReceiver()
         startUpdatesObserver()
     }
 
@@ -156,8 +169,6 @@ class PlaybackService : Service() {
                         updateMediaSessionState()
                     }
                 }
-                // currentWordRange intentionally omitted: updating MediaSession on every
-                // word (~4x/sec) causes excessive system notification refreshes.
                 // Sentence-level granularity is sufficient for lock-screen position display.
             } else {
                 Log.w("PlaybackService", "ReadoutTtsEngine.instance is null during updates observation. Stopping service.")
@@ -195,6 +206,24 @@ class PlaybackService : Service() {
         val isPlaying = engine.isPlaying.value
         val title = engine.documentTitle.ifBlank { "Readout Player" }
 
+        val totalChars = engine.totalCharacters
+        val currentChar = engine.currentCharacterIndex
+        val progressFraction = if (totalChars > 0) (currentChar.toFloat() / totalChars).coerceIn(0f, 1f) else 0f
+        val percentage = (progressFraction * 100).toInt().coerceIn(0, 100)
+
+        val wordsRemaining = (((1f - progressFraction) * (totalChars / 5f))).toInt().coerceAtLeast(0)
+        val speed = engine.playbackSpeed.value.coerceAtLeast(0.5f)
+        val totalSeconds = (wordsRemaining / (2.5f * speed)).toInt()
+        val timeRemainingStr = if (percentage >= 100 || totalSeconds <= 0) {
+            "Completed"
+        } else if (totalSeconds < 60) {
+            "${totalSeconds}s remaining"
+        } else {
+            val mins = totalSeconds / 60
+            if (mins < 60) "${mins}m remaining" else "${mins / 60}h ${mins % 60}m remaining"
+        }
+        val contentSubtitle = if (percentage >= 100) "100% · Completed" else "$percentage% · $timeRemainingStr"
+
         val playPauseIcon = if (isPlaying) {
             android.R.drawable.ic_media_pause
         } else {
@@ -202,22 +231,22 @@ class PlaybackService : Service() {
         }
 
         val playPauseAction = Notification.Action.Builder(
-            playPauseIcon, "Play/Pause",
+            Icon.createWithResource(this, playPauseIcon), "Play/Pause",
             getPendingIntent(ACTION_PLAY_PAUSE)
         ).build()
 
         val skipBackwardAction = Notification.Action.Builder(
-            android.R.drawable.ic_media_rew, "Rewind",
+            Icon.createWithResource(this, android.R.drawable.ic_media_rew), "Rewind",
             getPendingIntent(ACTION_SKIP_BACKWARD)
         ).build()
 
         val skipForwardAction = Notification.Action.Builder(
-            android.R.drawable.ic_media_ff, "Forward",
+            Icon.createWithResource(this, android.R.drawable.ic_media_ff), "Forward",
             getPendingIntent(ACTION_SKIP_FORWARD)
         ).build()
 
         val stopAction = Notification.Action.Builder(
-            android.R.drawable.ic_menu_close_clear_cancel, "Stop",
+            Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel), "Stop",
             getPendingIntent(ACTION_STOP)
         ).build()
 
@@ -241,6 +270,7 @@ class PlaybackService : Service() {
                     .setShowActionsInCompactView(0, 1, 2)
             )
             .setContentTitle(title)
+            .setContentText(contentSubtitle)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentIntent(contentIntent)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
@@ -263,26 +293,31 @@ class PlaybackService : Service() {
     private fun updateMediaSessionState() {
         val engine = ReadoutTtsEngine.instance ?: return
         val isPlaying = engine.isPlaying.value
-        val position = engine.currentCharacterIndex.toLong()
-        val duration = engine.totalCharacters.toLong()
+        val totalChars = engine.totalCharacters
+        val currentChar = engine.currentCharacterIndex
+
+        // Convert character progress to estimated time in milliseconds (80ms/char ~ 2.5 words/sec)
+        val durationMs = (totalChars.toLong() * 80L).coerceAtLeast(1000L)
+        val positionMs = (currentChar.toLong() * 80L).coerceIn(0L, durationMs)
 
         val stateBuilder = PlaybackState.Builder()
             .setActions(
                 PlaybackState.ACTION_PLAY or
                 PlaybackState.ACTION_PAUSE or
                 PlaybackState.ACTION_SKIP_TO_NEXT or
-                PlaybackState.ACTION_SKIP_TO_PREVIOUS
+                PlaybackState.ACTION_SKIP_TO_PREVIOUS or
+                PlaybackState.ACTION_SEEK_TO
             )
             .setState(
                 if (isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
-                position,
+                positionMs,
                 if (isPlaying) engine.playbackSpeed.value else 0f
             )
         mediaSession?.setPlaybackState(stateBuilder.build())
 
         val metadataBuilder = MediaMetadata.Builder()
             .putString(MediaMetadata.METADATA_KEY_TITLE, engine.documentTitle.ifBlank { "Readout Player" })
-            .putLong(MediaMetadata.METADATA_KEY_DURATION, duration)
+            .putLong(MediaMetadata.METADATA_KEY_DURATION, durationMs)
         mediaSession?.setMetadata(metadataBuilder.build())
     }
 

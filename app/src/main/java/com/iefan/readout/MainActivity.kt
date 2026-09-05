@@ -19,6 +19,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.iefan.readout.ui.components.SettingsDialog
 import com.iefan.readout.ui.screens.*
@@ -78,21 +79,35 @@ class MainActivity : ComponentActivity() {
                 val selectedVoiceId by viewModel.selectedVoiceId.collectAsStateWithLifecycle()
                 val availableVoices by viewModel.availableVoices.collectAsStateWithLifecycle()
                 val translationTargetLang by viewModel.translationTargetLang.collectAsStateWithLifecycle()
+                val translatedSentences by viewModel.translatedSentences.collectAsStateWithLifecycle()
 
                 val isImporting by viewModel.isImporting.collectAsStateWithLifecycle()
+                val importProgress by viewModel.importProgress.collectAsStateWithLifecycle()
                 val isPlayerExpanded by viewModel.isPlayerExpanded.collectAsStateWithLifecycle()
                 val isPreparingPlayback by viewModel.isPreparingPlayback.collectAsStateWithLifecycle()
                 val activeChapters by viewModel.activeChapters.collectAsStateWithLifecycle()
                 val activeBookmarks by viewModel.activeBookmarks.collectAsStateWithLifecycle()
                 val allBookmarks by viewModel.allBookmarks.collectAsStateWithLifecycle()
 
-                val progressFraction = remember(wordRange, sentences, currentIndex) {
-                    val totalChars = if (sentences.isNotEmpty()) sentences.last().end else 0
-                    val currentCharIndex = wordRange?.second ?: (sentences.getOrNull(currentIndex)?.start ?: 0)
-                    if (totalChars > 0) currentCharIndex.toFloat() / totalChars else 0f
+                val progressFraction = remember(wordRange, sentences, currentIndex, activeDoc) {
+                    val doc = activeDoc
+                    if (doc != null) {
+                        val totalChars = if (sentences.isNotEmpty()) {
+                            sentences.last().end
+                        } else {
+                            doc.contentLength.takeIf { it > 0 } ?: doc.content.length
+                        }
+                        val currentCharIndex = wordRange?.second
+                            ?: (sentences.getOrNull(currentIndex)?.start)
+                            ?: doc.playbackPosition
+                        if (totalChars > 0) (currentCharIndex.toFloat() / totalChars).coerceIn(0f, 1f) else 0f
+                    } else {
+                        0f
+                    }
                 }
 
                 var showSettings by remember { mutableStateOf(false) }
+                var settingsInitialScreen by remember { mutableIntStateOf(0) }
 
                 val scope = rememberCoroutineScope()
 
@@ -183,6 +198,7 @@ class MainActivity : ComponentActivity() {
 
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
+                    containerColor = Color.Black,
                     snackbarHost = { SnackbarHost(hostState = snackbarHostState) }
                 ) { paddingValues ->
                     val activeDocVal = activeDoc
@@ -218,20 +234,39 @@ class MainActivity : ComponentActivity() {
                                 allCrossRefs = allCrossRefs,
                                 onSelectDocument = { doc -> viewModel.selectDocument(doc) },
                                 onDeleteDocument = { doc -> viewModel.deleteDocument(doc) },
-                                onAddDocument = { title, content, sUrl, coverPath ->
-                                    viewModel.addNewBook(title, content, sUrl, coverPath)
+                                onAddDocument = { title, content, sUrl, coverPath, isFavorite, collectionId ->
+                                    viewModel.addNewBook(title, content, sUrl, coverPath, emptyList(), false, null, isFavorite, collectionId)
                                 },
-                                onOpenSettings = { showSettings = true },
+                                onOpenSettings = {
+                                    settingsInitialScreen = 0
+                                    showSettings = true
+                                },
                                 onOpenLibrary = { viewModel.setLibraryOpen(true) },
                                 onToggleFavorite = { doc -> viewModel.toggleFavorite(doc) },
                                 onAddDocumentToCollection = { docId, colId -> viewModel.addDocumentToCollection(docId, colId) },
                                 onRemoveDocumentFromCollection = { docId, colId -> viewModel.removeDocumentFromCollection(docId, colId) },
-                                onCreateCollection = { name, docId -> viewModel.createCollection(name, docId) },
+                                onCreateCollection = { name, docId, onCreated -> viewModel.createCollection(name, docId, onCreated) },
                                 onDeleteCollection = { col -> viewModel.deleteCollection(col) },
                                 onRenameCollection = { col, newName -> viewModel.renameCollection(col, newName) },
                                 isImporting = isImporting,
-                                onUrlImport = { url, customTitle -> viewModel.importDocumentFromUrl(url, customTitle) },
-                                onUriImport = { uri, customTitle, autoSelect -> viewModel.importDocumentFromUri(uri, customTitle, autoSelect) },
+                                importProgress = importProgress,
+                                onBatchImport = { drafts ->
+                                    viewModel.importDocumentsBatch(drafts.map {
+                                        com.iefan.readout.viewmodel.BatchImportItem(
+                                            uri = it.uri,
+                                            title = it.title.ifBlank { null },
+                                            customCoverUri = it.customCoverUri,
+                                            isFavorite = it.isFavorite,
+                                            collectionId = it.collectionId
+                                        )
+                                    })
+                                },
+                                onUrlImport = { url, customTitle, coverUri, isFavorite, collectionId ->
+                                    viewModel.importDocumentFromUrl(url, customTitle, coverUri, isFavorite, collectionId)
+                                },
+                                onUriImport = { uri, customTitle, autoSelect, coverUri, isFavorite, collectionId ->
+                                    viewModel.importDocumentFromUri(uri, customTitle, autoSelect, coverUri, isFavorite, collectionId)
+                                },
                                 onEditDocument = { docId, nextTitle, nextCoverUri, removeCover ->
                                     viewModel.updateBookDetails(docId, nextTitle, nextCoverUri, removeCover)
                                 },
@@ -255,7 +290,7 @@ class MainActivity : ComponentActivity() {
                             return@Scaffold
                         }
                         ActivePlayerView(
-                            modifier = Modifier.padding(paddingValues),
+                            modifier = Modifier.fillMaxSize(),
                             document = doc,
                             sentences = sentences,
                             isPlaying = isPlaying,
@@ -281,14 +316,25 @@ class MainActivity : ComponentActivity() {
                             },
                             onRemoveBookmark = { bookmark -> viewModel.removeBookmark(bookmark) },
                             isTranslating = translationTargetLang != "none",
+                            translationTargetLang = translationTargetLang,
+                            translatedSentences = translatedSentences,
                             isPreparingPlayback = isPreparingPlayback,
-                            onSeekToFraction = { fraction -> viewModel.seekToFraction(fraction) }
+                            onSeekToFraction = { fraction -> viewModel.seekToFraction(fraction) },
+                            onOpenSettings = {
+                                settingsInitialScreen = 0
+                                showSettings = true
+                            },
+                            onOpenTranslation = {
+                                settingsInitialScreen = 2
+                                showSettings = true
+                            }
                         )
                     }
 
                     // Settings dialog overlay
                     if (showSettings) {
                         SettingsDialog(
+                            initialScreen = settingsInitialScreen,
                             selectedVoiceId = selectedVoiceId,
                             availableVoices = availableVoices,
                             onSelectVoice = { voiceId -> viewModel.setSelectedVoiceId(voiceId) },
@@ -349,14 +395,14 @@ class MainActivity : ComponentActivity() {
                 }
                 if (uri != null) {
                     Log.d("MainActivity", "Importing file URI via ACTION_SEND: $uri")
-                    viewModel.importDocumentFromUri(uri, null, autoSelect = true)
+                    viewModel.importDocumentFromUri(uri, null, autoSelect = false)
                 }
             }
         } else if (Intent.ACTION_VIEW == action) {
             val uri = intent.data
             if (uri != null) {
                 Log.d("MainActivity", "Importing file URI via ACTION_VIEW: $uri")
-                viewModel.importDocumentFromUri(uri, null, autoSelect = true)
+                viewModel.importDocumentFromUri(uri, null, autoSelect = false)
             }
         }
     }
