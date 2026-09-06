@@ -39,7 +39,7 @@ import com.iefan.readout.data.Document
 import com.iefan.readout.data.Chapter
 import com.iefan.readout.data.Bookmark
 import com.iefan.readout.tts.SpeechSentence
-import com.iefan.readout.ui.components.KaraokeView
+import com.iefan.readout.ui.components.SentenceReaderView
 import com.iefan.readout.ui.components.styleOfCaption
 import com.iefan.readout.utils.rememberHapticTrigger
 import com.iefan.readout.ui.components.styleOfSubtitle
@@ -61,7 +61,6 @@ fun ActivePlayerView(
     sentences: List<SpeechSentence>,
     isPlaying: Boolean,
     currentSentenceIndex: Int,
-    currentWordRange: Pair<Int, Int>?,
     progressFraction: Float,
     playbackSpeed: Float,
     sleepTimerMinutes: Int,
@@ -82,6 +81,8 @@ fun ActivePlayerView(
     isTranslating: Boolean,
     translationTargetLang: String = "none",
     translatedSentences: Map<Int, String> = emptyMap(),
+    translationErrors: Map<Int, String> = emptyMap(),
+    onRetryTranslation: (Int) -> Unit = {},
     isPreparingPlayback: Boolean,
     onSeekToFraction: (Float) -> Unit = {},
     onOpenSettings: () -> Unit = {},
@@ -364,13 +365,14 @@ fun ActivePlayerView(
             ) {
                 // Upper viewport: Karaoke follow reader viewport (takes full height in background)
                 key(document.id) {
-                    KaraokeView(
+                    SentenceReaderView(
                         sentences = sentences,
                         activeSentenceIndex = currentSentenceIndex,
-                        currentWordRange = currentWordRange,
                         isPlaying = isPlaying,
                         isTranslating = isTranslating,
                         translatedSentences = translatedSentences,
+                        translationErrors = translationErrors,
+                        onRetryTranslation = onRetryTranslation,
                         onSentenceJump = { idx ->
                             onSeekToSentence(idx)
                             if (!isPlaying) {

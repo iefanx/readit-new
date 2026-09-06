@@ -190,6 +190,7 @@ fun MainLibraryView(
     onCreateCollection: (String, Long?, ((Long) -> Unit)?) -> Unit = { _, _, _ -> },
     onDeleteCollection: (CollectionEntity) -> Unit,
     onRenameCollection: (CollectionEntity, String) -> Unit,
+    onCancelImport: () -> Unit = {},
     isImporting: Boolean = false,
     importProgress: ImportTaskProgress = ImportTaskProgress(),
     onBatchImport: ((List<SelectedDocumentDraft>) -> Unit)? = null,
@@ -883,7 +884,7 @@ fun MainLibraryView(
 
         // Granular, transparent progress dialog tracking extraction, speech analysis, and saving
         if (importProgress.isImporting) {
-            ImportProgressDialog(progress = importProgress)
+            ImportProgressDialog(progress = importProgress, onCancel = onCancelImport)
         }
 
         collectionTargetDoc?.let { doc ->
@@ -1143,18 +1144,9 @@ fun DocumentCard(
                 } else {
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                         try {
-                            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                            BitmapFactory.decodeFile(path, opts)
-                            val maxDim = 512
-                            var sample = 1
-                            while (opts.outWidth / (sample * 2) >= maxDim && opts.outHeight / (sample * 2) >= maxDim) {
-                                sample *= 2
-                            }
-                            val decodeOpts = BitmapFactory.Options().apply {
-                                inSampleSize = sample
-                                inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
-                            }
-                            val bitmap = BitmapFactory.decodeFile(path, decodeOpts)?.asImageBitmap()
+                            val bitmap = com.iefan.readout.utils.BitmapOptimizer
+                                .decodeSampledBitmapFromFile(path, 360, 540)
+                                ?.asImageBitmap()
                             if (bitmap != null) CoverCache.put(path, bitmap)
                             else CoverCache.markFailed(path)
                             bitmap
@@ -1355,6 +1347,7 @@ private fun saveCoverFromUri(context: android.content.Context, uri: Uri?): Strin
 
 @Composable
 fun ImportProgressDialog(
+    onCancel: () -> Unit = {},
     progress: ImportTaskProgress,
     onDismissRequest: () -> Unit = {}
 ) {
@@ -1400,6 +1393,7 @@ fun ImportProgressDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
+                TextButton(onClick = onCancel) { Text("Cancel import") }
                 val headerText = if (progress.totalItems > 1) {
                     "Importing Documents (${progress.currentItemIndex}/${progress.totalItems})"
                 } else {
@@ -3083,7 +3077,9 @@ fun MiniPlayer(
                             } else {
                                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                                     try {
-                                        val bitmap = BitmapFactory.decodeFile(path)?.asImageBitmap()
+                                        val bitmap = com.iefan.readout.utils.BitmapOptimizer
+                                            .decodeSampledBitmapFromFile(path, 180, 270)
+                                            ?.asImageBitmap()
                                         if (bitmap != null) {
                                             CoverCache.put(path, bitmap)
                                         } else {

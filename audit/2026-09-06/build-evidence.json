@@ -1,0 +1,13 @@
+{
+  "audited_main_sha": "05a8cb4f4b032c9546cb250a9ebad7c7b24a9379",
+  "local_version": "1.6.2",
+  "local_version_code": 38,
+  "release_build": "passed",
+  "release_bundle_sha256": "6462d373b20af3420fb38a194b898138b29c6db8995c10daf67da36b187f3ea8",
+  "release_bundle_bytes": 6525161,
+  "unit_tests": 13,
+  "unit_test_failures": 0,
+  "lint_warnings": 66,
+  "lint_errors": 0,
+  "connected_devices": 0
+}

@@ -47,147 +47,57 @@ object DocumentParser {
         return ABBREVIATIONS.contains(lastWord)
     }
 
-    private fun findParagraphEnd(text: String, start: Int): Int {
-        val len = text.length
-        var idx = start
-        while (idx < len) {
-            val nextNewline = text.indexOf('\n', idx)
-            if (nextNewline == -1) return len
-
-            // 1. Double newline (blank line) -> unambiguous paragraph break
-            var cursor = nextNewline + 1
-            while (cursor < len && (text[cursor] == ' ' || text[cursor] == '\t')) {
-                cursor++
-            }
-            if (cursor < len && text[cursor] == '\n') {
-                return nextNewline
-            }
-
-            // 2. Check if line before nextNewline ends with terminal punctuation AND next line is a bullet/number
-            val lineBefore = text.substring(start, nextNewline).trimEnd()
-            val remaining = text.substring(nextNewline + 1).trimStart()
-            val endsWithTerminal = lineBefore.endsWith('.') || lineBefore.endsWith('!') ||
-                    lineBefore.endsWith('?') || lineBefore.endsWith(':') ||
-                    lineBefore.endsWith('"') || lineBefore.endsWith('”') || lineBefore.endsWith('’')
-
-            val startsWithBulletOrNumber = remaining.startsWith("- ") || remaining.startsWith("* ") ||
-                    remaining.startsWith("• ") || remaining.matches(Regex("""^\d+\.\s+.*"""))
-
-            if (endsWithTerminal && startsWithBulletOrNumber) {
-                return nextNewline
-            }
-
-            // Otherwise, line wrap inside the same paragraph
-            idx = nextNewline + 1
-        }
-        return len
-    }
+    // Bounded iterative scanning: no recursive regex and no copying the remaining document.
+    const val MAX_SENTENCE_CHARS = 800
+    private val wordRegex = Regex("[\\p{L}\\p{M}\\p{N}']+")
 
     fun parse(rawText: String): List<SpeechSentence> {
         val text = TextCleaner.clean(rawText)
-        val sentences = mutableListOf<SpeechSentence>()
-        if (text.isBlank()) return sentences
-
-        // Matches sentence boundary ending with punctuation + quotes + whitespace, or trailing text
-        val sentenceRegex = Regex("((?:[^.!?]|\\.(?!\\s|$))+[.!?]*[\"”’')\\]]*(?:\\s+|$)|(?:[^.!?]|\\.(?!\\s|$))+$)")
-        val wordRegex = Regex("[\\p{L}\\p{M}\\p{N}']+")
-
-        var sentenceIndex = 0
-        var paragraphIndex = 0
+        val result = mutableListOf<SpeechSentence>()
         var start = 0
-        val len = text.length
-
-        while (start < len) {
-            var end = findParagraphEnd(text, start)
-            if (end == start) {
-                // Skip past newlines/whitespace
-                while (start < len && (text[start] == '\n' || text[start].isWhitespace())) {
-                    start++
-                }
-                continue
-            }
-
-            if (start < end) {
-                var hasContent = false
-                for (i in start until end) {
-                    if (!text[i].isWhitespace()) {
-                        hasContent = true
+        var paragraph = 0
+        while (start < text.length) {
+            while (start < text.length && text[start].isWhitespace()) start++
+            if (start == text.length) break
+            var cursor = start
+            var lastSpace = -1
+            var paragraphBreak = false
+            while (cursor < text.length) {
+                val c = text[cursor]
+                if (c.isWhitespace()) lastSpace = cursor
+                if (c == '\n') {
+                    var next = cursor + 1
+                    while (next < text.length && (text[next] == ' ' || text[next] == '\t')) next++
+                    if (next < text.length && text[next] == '\n') {
+                        paragraphBreak = true
                         break
                     }
                 }
-
-                if (hasContent) {
-                    val paragraphText = text.substring(start, end)
-                    val rawMatches = sentenceRegex.findAll(paragraphText).toList()
-                    var addedSentenceInParagraph = false
-
-                    // Merge abbreviations so they don't break sentences awkwardly
-                    val mergedMatches = mutableListOf<Pair<IntRange, String>>()
-                    var matchIdx = 0
-                    while (matchIdx < rawMatches.size) {
-                        val m = rawMatches[matchIdx]
-                        var currentRange = m.range
-                        var currentText = m.value
-
-                        while (matchIdx + 1 < rawMatches.size && isAbbreviationEnd(currentText)) {
-                            val nextM = rawMatches[matchIdx + 1]
-                            currentRange = currentRange.first..nextM.range.last
-                            currentText += nextM.value
-                            matchIdx++
-                        }
-                        mergedMatches.add(currentRange to currentText)
-                        matchIdx++
-                    }
-
-                    for (match in mergedMatches) {
-                        val sentenceText = match.second
-                        if (sentenceText.trim().isEmpty()) continue
-
-                        val sentenceStart = start + match.first.first
-                        val sentenceEnd = start + match.first.last + 1
-
-                        // Parse individual words within this sentence
-                        val words = mutableListOf<SpeechWord>()
-                        val wordMatches = wordRegex.findAll(sentenceText)
-
-                        for (wordMatch in wordMatches) {
-                            val wordText = wordMatch.value
-                            val wordStartInSentence = wordMatch.range.first
-                            val wordEndInSentence = wordMatch.range.last + 1
-
-                            words.add(
-                                SpeechWord(
-                                    text = wordText,
-                                    start = sentenceStart + wordStartInSentence,
-                                    end = sentenceStart + wordEndInSentence
-                                )
-                            )
-                        }
-
-                        sentences.add(
-                            SpeechSentence(
-                                index = sentenceIndex++,
-                                text = sentenceText,
-                                start = sentenceStart,
-                                end = sentenceEnd,
-                                words = words,
-                                paragraphIndex = paragraphIndex
-                            )
-                        )
-                        addedSentenceInParagraph = true
-                    }
-                    if (addedSentenceInParagraph) {
-                        paragraphIndex++
+                if (cursor - start >= MAX_SENTENCE_CHARS - 1) {
+                    cursor = if (lastSpace > start) lastSpace else cursor
+                    if (cursor > start && Character.isHighSurrogate(text[cursor - 1])) cursor--
+                    break
+                }
+                if (c in ".!?。！？।॥") {
+                    var end = cursor + 1
+                    while (end < text.length && text[end] in ".!?。！？।॥\"”’')]") end++
+                    val boundary = c in "。！？।॥" || end == text.length || text[end].isWhitespace()
+                    if (boundary && !(c == '.' && isAbbreviationEnd(text.substring(start, end)))) {
+                        cursor = end
+                        break
                     }
                 }
+                cursor++
             }
-
-            start = end
-            while (start < len && (text[start] == '\n' || text[start].isWhitespace())) {
-                start++
-            }
+            if (cursor <= start) cursor = (start + 1).coerceAtMost(text.length)
+            val sentenceText = text.substring(start, cursor)
+            val words = wordRegex.findAll(sentenceText).map {
+                SpeechWord(it.value, start + it.range.first, start + it.range.last + 1)
+            }.toList()
+            result.add(SpeechSentence(result.size, sentenceText, start, cursor, words, paragraph))
+            start = cursor
+            if (paragraphBreak) paragraph++
         }
-        return sentences
+        return result
     }
 }
-

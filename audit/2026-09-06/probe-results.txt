@@ -1,0 +1,14 @@
+parse chars=29 sentences=2 longest=16
+parse chars=9 sentences=1 longest=9
+parse chars=36 sentences=1 longest=36
+parse chars=6000 ERROR=StackOverflowError
+DOCX split runs: [Helloworld]
+Spanish normalization: El descuento es 15 percent.
+Time normalization: Meet at 5, 30 p. m.
+Numeric content cleanup: [Year
+
+Value
+
+End]
+Repository actual-size chunk probe: input 1600008 output 1600007 equal False
+BOUNDARY retained: False OUNDARY retained: True

@@ -181,8 +181,12 @@ suspend fun scanDocumentTree(
 
         val treeDocId = DocumentsContract.getTreeDocumentId(treeUri)
 
-        fun traverse(docId: String, depth: Int) {
-            if (depth > 4) return
+        val directories = java.util.ArrayDeque<String>()
+        val visited = mutableSetOf<String>()
+        directories.add(treeDocId)
+        while (directories.isNotEmpty()) {
+            val docId = directories.removeFirst()
+            if (!visited.add(docId)) continue
             val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
             val projection = arrayOf(
                 DocumentsContract.Document.COLUMN_DOCUMENT_ID,
@@ -208,11 +212,11 @@ suspend fun scanDocumentTree(
 
                     if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
                         if (childId.isNotBlank()) {
-                            traverse(childId, depth + 1)
+                            directories.add(childId)
                         }
                     } else {
                         val ext = name.substringAfterLast(".", "").lowercase()
-                        if (ext in supportedExtensions && seenNames.add(name.lowercase())) {
+                        if (ext in supportedExtensions && seenNames.add(childId)) {
                             val fileUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childId)
                             results.add(
                                 DiscoveredDocument(
@@ -229,7 +233,7 @@ suspend fun scanDocumentTree(
             }
         }
 
-        traverse(treeDocId, 0)
+
     } catch (_: Throwable) {}
 
     results.sortedByDescending { it.lastModified }
@@ -265,9 +269,7 @@ suspend fun scanDeviceForDocuments(
     for (folder in searchFolders) {
         try {
             if (folder.exists() && folder.isDirectory && folder.canRead()) {
-                val maxDepth = if (folder == root) 3 else 4
                 folder.walkTopDown()
-                    .maxDepth(maxDepth)
                     .onEnter { dir ->
                         val dName = dir.name.lowercase()
                         !dName.startsWith(".") && dName != "android" && dName != "data" && dName != "obb"
@@ -275,7 +277,7 @@ suspend fun scanDeviceForDocuments(
                     .filter { it.isFile && it.extension.lowercase() in supportedExtensions }
                     .forEach { file ->
                         val lowerName = file.name.lowercase()
-                        if (seenNames.add(lowerName)) {
+                        if (seenNames.add(file.canonicalPath)) {
                             results.add(
                                 DiscoveredDocument(
                                     uri = Uri.fromFile(file),
@@ -324,11 +326,11 @@ suspend fun scanDeviceForDocuments(
             val dateCol = cursor.getColumnIndex(MediaStore.Files.FileColumns.DATE_MODIFIED)
 
             while (cursor.moveToNext()) {
+                val id = if (idCol != -1) cursor.getLong(idCol) else 0L
                 val name = if (nameCol != -1) cursor.getString(nameCol) ?: "" else ""
                 val lowerName = name.lowercase()
                 val ext = name.substringAfterLast(".", "").uppercase()
-                if (name.isNotBlank() && ext.lowercase() in supportedExtensions && seenNames.add(lowerName)) {
-                    val id = if (idCol != -1) cursor.getLong(idCol) else 0L
+                if (name.isNotBlank() && ext.lowercase() in supportedExtensions && seenNames.add("media:$id")) {
                     val size = if (sizeCol != -1) cursor.getLong(sizeCol) else 0L
                     val date = if (dateCol != -1) cursor.getLong(dateCol) * 1000L else 0L
                     val docUri = ContentUris.withAppendedId(queryUri, id)
@@ -530,6 +532,7 @@ fun DeviceScannerSheet(
         hasPerm = hasStoragePermission(context)
         currentStep = ScannerStep.SCANNING
         scope.launch {
+            android.widget.Toast.makeText(context, "Scanning accessible folders and indexed files. Protected folders may be omitted.", android.widget.Toast.LENGTH_LONG).show()
             val results = scanDeviceForDocuments(context, selectedFormats)
             documents = results
             selectedDocuments = emptySet()

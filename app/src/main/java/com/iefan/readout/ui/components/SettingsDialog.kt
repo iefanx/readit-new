@@ -45,6 +45,7 @@ fun SettingsDialog(
     previewingVoiceId: String? = null,
     availableVoices: List<VoiceInfo>,
     onSelectVoice: (String) -> Unit,
+    onOfflineOnlyChange: (Boolean) -> Unit = {},
     onPreviewVoice: (String, String, java.util.Locale) -> Unit = { _, _, _ -> },
     translationTargetLang: String,
     onSelectTranslationLang: (String) -> Unit,
@@ -55,6 +56,7 @@ fun SettingsDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    var offlineOnly by remember { mutableStateOf(context.getSharedPreferences("readout_prefs", android.content.Context.MODE_PRIVATE).getBoolean("offline_only", true)) }
     var currentScreen by remember(initialScreen) { mutableIntStateOf(initialScreen) } // 0 = Main Settings, 1 = Voice Selection, 2 = Translation, 3 = Theme Color
     var translationSearchQuery by remember { mutableStateOf("") }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -222,6 +224,13 @@ fun SettingsDialog(
                             modifier = Modifier.fillMaxWidth(),
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Use offline voices only")
+                                    Text("Online voices may send text to your speech provider. Translation always uses online services.", style = MaterialTheme.typography.bodySmall)
+                                }
+                                Switch(checked = offlineOnly, onCheckedChange = { offlineOnly = it; onOfflineOnlyChange(it) })
+                            }
                             // Category: Voice Selection
                             Row(
                                 modifier = Modifier
@@ -306,7 +315,7 @@ fun SettingsDialog(
                                 Spacer(modifier = Modifier.width(14.dp))
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = "Translation Language",
+                                        text = "Translation Language (online)",
                                         style = MaterialTheme.typography.bodyMedium,
                                         fontWeight = FontWeight.SemiBold,
                                         color = Color.White

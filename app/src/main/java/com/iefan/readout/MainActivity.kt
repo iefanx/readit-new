@@ -6,6 +6,7 @@ import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -44,7 +45,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        )
 
         // Request notification permission for Android 13+ (API 33+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -71,8 +75,10 @@ class MainActivity : ComponentActivity() {
                 val activeDoc by viewModel.activeDocument.collectAsStateWithLifecycle()
                 val sentences by viewModel.activeSentences.collectAsStateWithLifecycle()
                 val isPlaying by viewModel.isPlaying.collectAsStateWithLifecycle()
+                val isCompleted by viewModel.isCompleted.collectAsStateWithLifecycle()
+                val translationErrors by viewModel.translationErrors.collectAsStateWithLifecycle()
+                val playbackError by viewModel.playbackError.collectAsStateWithLifecycle()
                 val currentIndex by viewModel.currentSentenceIndex.collectAsStateWithLifecycle()
-                val wordRange by viewModel.currentWordRange.collectAsStateWithLifecycle()
                 val speed by viewModel.playbackSpeed.collectAsStateWithLifecycle()
                 val sleepTimerMinutes by viewModel.sleepTimerMinutes.collectAsStateWithLifecycle()
                 val remainingSeconds by viewModel.sleepTimerRemainingSeconds.collectAsStateWithLifecycle()
@@ -90,7 +96,7 @@ class MainActivity : ComponentActivity() {
                 val activeBookmarks by viewModel.activeBookmarks.collectAsStateWithLifecycle()
                 val allBookmarks by viewModel.allBookmarks.collectAsStateWithLifecycle()
 
-                val progressFraction = remember(wordRange, sentences, currentIndex, activeDoc) {
+                val progressFraction = remember(sentences, currentIndex, activeDoc, isCompleted) {
                     val doc = activeDoc
                     if (doc != null) {
                         val totalChars = if (sentences.isNotEmpty()) {
@@ -98,8 +104,7 @@ class MainActivity : ComponentActivity() {
                         } else {
                             doc.contentLength.takeIf { it > 0 } ?: doc.content.length
                         }
-                        val currentCharIndex = wordRange?.second
-                            ?: (sentences.getOrNull(currentIndex)?.start)
+                        val currentCharIndex = (if (isCompleted) totalChars else sentences.getOrNull(currentIndex)?.start)
                             ?: doc.playbackPosition
                         if (totalChars > 0) (currentCharIndex.toFloat() / totalChars).coerceIn(0f, 1f) else 0f
                     } else {
@@ -121,6 +126,9 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val snackbarHostState = remember { SnackbarHostState() }
+                LaunchedEffect(playbackError) {
+                    playbackError?.let { snackbarHostState.showSnackbar(it); viewModel.clearPlaybackError() }
+                }
 
                 val importBackupLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.GetContent()
@@ -128,8 +136,8 @@ class MainActivity : ComponentActivity() {
                     if (uri != null) {
                         scope.launch {
                             try {
-                                val jsonString = this@MainActivity.contentResolver.openInputStream(uri)?.use { input ->
-                                    input.bufferedReader().readText()
+                                val jsonString = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                    this@MainActivity.contentResolver.openInputStream(uri)?.use { com.iefan.readout.utils.DocumentText.read(it, 64L * 1024 * 1024) }
                                 }
                                 if (jsonString != null) {
                                     val success = viewModel.importBackupData(jsonString)
@@ -153,10 +161,12 @@ class MainActivity : ComponentActivity() {
                         scope.launch {
                             try {
                                 val jsonString = viewModel.exportBackupData()
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                                 this@MainActivity.contentResolver.openOutputStream(uri)?.use { output ->
                                     output.bufferedWriter().use { writer ->
                                         writer.write(jsonString)
                                     }
+                                }
                                 }
                                 snackbarHostState.showSnackbar("Data exported successfully!")
                             } catch (e: Exception) {
@@ -250,6 +260,7 @@ class MainActivity : ComponentActivity() {
                                 onDeleteCollection = { col -> viewModel.deleteCollection(col) },
                                 onRenameCollection = { col, newName -> viewModel.renameCollection(col, newName) },
                                 isImporting = isImporting,
+                                onCancelImport = { viewModel.cancelImports() },
                                 importProgress = importProgress,
                                 onBatchImport = { drafts ->
                                     viewModel.importDocumentsBatch(drafts.map {
@@ -298,7 +309,6 @@ class MainActivity : ComponentActivity() {
                             sentences = sentences,
                             isPlaying = isPlaying,
                             currentSentenceIndex = currentIndex,
-                            currentWordRange = wordRange,
                             progressFraction = progressFraction,
                             playbackSpeed = speed,
                             sleepTimerMinutes = sleepTimerMinutes,
@@ -318,9 +328,11 @@ class MainActivity : ComponentActivity() {
                                 viewModel.addBookmark(sentIdx, charOff, lbl)
                             },
                             onRemoveBookmark = { bookmark -> viewModel.removeBookmark(bookmark) },
-                            isTranslating = translationTargetLang != "none",
+                            isTranslating = translationTargetLang.isNotEmpty() && translationTargetLang != "none",
                             translationTargetLang = translationTargetLang,
                             translatedSentences = translatedSentences,
+                            translationErrors = translationErrors,
+                            onRetryTranslation = { viewModel.retryTranslation(it) },
                             isPreparingPlayback = isPreparingPlayback,
                             onSeekToFraction = { fraction -> viewModel.seekToFraction(fraction) },
                             onOpenSettings = {
@@ -342,6 +354,7 @@ class MainActivity : ComponentActivity() {
                             previewingVoiceId = previewingVoiceId,
                             availableVoices = availableVoices,
                             onSelectVoice = { voiceId -> viewModel.setSelectedVoiceId(voiceId) },
+                            onOfflineOnlyChange = { viewModel.setOfflineOnly(it) },
                             onPreviewVoice = { voiceId, name, locale -> viewModel.previewVoice(voiceId, name, locale) },
                             translationTargetLang = translationTargetLang,
                             onSelectTranslationLang = { lang -> viewModel.setTranslationTargetLang(lang) },
@@ -376,31 +389,23 @@ class MainActivity : ComponentActivity() {
 
         Log.d("MainActivity", "handleIntent: action=$action, type=$type")
 
-        if (Intent.ACTION_SEND == action && type != null) {
-            if (type.startsWith("text/")) {
-                val text = intent.getStringExtra(Intent.EXTRA_TEXT)
-                if (!text.isNullOrBlank()) {
-                    val trimmed = text.trim()
-                    if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || 
-                        android.util.Patterns.WEB_URL.matcher(trimmed).matches()) {
-                        Log.d("MainActivity", "Importing Web URL from Intent: $trimmed")
-                        viewModel.importDocumentFromUrl(trimmed, null)
-                    } else {
-                        Log.d("MainActivity", "Importing plain text snippet from Intent")
-                        val titleSnippet = if (trimmed.length > 30) trimmed.take(27) + "..." else trimmed
-                        viewModel.addNewBook(title = "Shared: $titleSnippet", content = trimmed, sourceUrl = "Shared Text")
-                    }
-                }
+        if (action == Intent.ACTION_SEND || action == Intent.ACTION_SEND_MULTIPLE) {
+            val streams = if (action == Intent.ACTION_SEND_MULTIPLE) {
+                if (Build.VERSION.SDK_INT >= 33) intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+                else { @Suppress("DEPRECATION") intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty() }
             } else {
-                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-                } else {
-                    @Suppress("DEPRECATION")
-                    intent.getParcelableExtra(Intent.EXTRA_STREAM)
-                }
-                if (uri != null) {
-                    Log.d("MainActivity", "Importing file URI via ACTION_SEND: $uri")
-                    viewModel.importDocumentFromUri(uri, null, autoSelect = false)
+                val stream = if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                    else { @Suppress("DEPRECATION") intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM) }
+                listOfNotNull(stream)
+            }
+            val uris = (streams + (0 until (intent.clipData?.itemCount ?: 0)).mapNotNull { intent.clipData?.getItemAt(it)?.uri }).distinct()
+            if (uris.isNotEmpty()) {
+                viewModel.importDocumentsBatch(uris.map { com.iefan.readout.viewmodel.BatchImportItem(it, null) })
+            } else {
+                val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()
+                if (!text.isNullOrBlank()) {
+                    if (text.startsWith("https://") || text.startsWith("http://")) viewModel.importDocumentFromUrl(text)
+                    else viewModel.addNewBook("Shared: " + text.take(30), text, "Shared Text")
                 }
             }
         } else if (Intent.ACTION_VIEW == action) {

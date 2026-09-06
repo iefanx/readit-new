@@ -10,7 +10,7 @@ class TextCleanerTest {
     fun testStripCitations() {
         val input = "This is a sentence [1]. And another one [12, 13] with brackets [1-5]."
         val expected = "This is a sentence. And another one with brackets."
-        assertEquals(expected, TextCleaner.clean(input))
+        assertEquals(expected, TextCleaner.clean(input, removeAnnotations = true))
     }
 
     @Test
@@ -43,21 +43,21 @@ class TextCleanerTest {
             Keep single digit heading.
         """.trimIndent()
 
-        assertEquals(expected, TextCleaner.clean(input))
+        assertEquals(expected, TextCleaner.clean(input, removeAnnotations = true))
     }
 
     @Test
     fun testStripUrls() {
         val input = "Check out https://google.com or www.wikipedia.org for details."
         val expected = "Check out or for details."
-        assertEquals(expected, TextCleaner.clean(input))
+        assertEquals(expected, TextCleaner.clean(input, removeAnnotations = true))
     }
 
     @Test
     fun testCollapseMultipleSpaces() {
         val input = "This   is   a    very    spaced   sentence."
         val expected = "This is a very spaced sentence."
-        assertEquals(expected, TextCleaner.clean(input))
+        assertEquals(expected, TextCleaner.clean(input, removeAnnotations = true))
     }
 
     @Test

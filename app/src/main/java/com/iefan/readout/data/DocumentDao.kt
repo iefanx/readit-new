@@ -5,6 +5,12 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface DocumentDao {
+    @Query("SELECT resultId FROM completed_operations WHERE id = :id")
+    suspend fun completedOperation(id: String): Long?
+
+    @Insert
+    suspend fun completeOperation(operation: CompletedOperation)
+
     @Query("SELECT id, title, '' as content, sourceUrl, addedDate, playbackPosition, selectedModelTier, playbackSpeed, coverPath, lastReadTime, isFavorite, contentLength FROM documents ORDER BY lastReadTime DESC, addedDate DESC")
     fun getAllDocuments(): Flow<List<Document>>
 

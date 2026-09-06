@@ -54,16 +54,7 @@ object CoverPreviewHelper {
      * Decodes a direct image URI with downsampling for preview size.
      */
     suspend fun decodeImageUri(context: Context, uri: Uri): ImageBitmap? = withContext(Dispatchers.IO) {
-        try {
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                val opts = BitmapFactory.Options().apply {
-                    inSampleSize = 2
-                }
-                BitmapFactory.decodeStream(input, null, opts)?.asImageBitmap()
-            }
-        } catch (_: Throwable) {
-            null
-        }
+        BitmapOptimizer.decodeSampledBitmapFromUri(context, uri, 360, 540)?.asImageBitmap()
     }
 
     /**
@@ -132,8 +123,7 @@ object CoverPreviewHelper {
                             ?: entries.firstOrNull { it.name.endsWith(coverHref, ignoreCase = true) }
                         if (coverEntry != null) {
                             zip.getInputStream(coverEntry).use { inp ->
-                                val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
-                                val bmp = BitmapFactory.decodeStream(inp, null, opts)
+                                val bmp = BitmapOptimizer.decodeSampledBitmapFromByteArray(inp.readBytes(), 360, 540)
                                 if (bmp != null) return@extractEpubCover bmp.asImageBitmap()
                             }
                         }
@@ -153,8 +143,7 @@ object CoverPreviewHelper {
                     }
                     if (entry != null) {
                         zip.getInputStream(entry).use { inp ->
-                            val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
-                            val bmp = BitmapFactory.decodeStream(inp, null, opts)
+                            val bmp = BitmapOptimizer.decodeSampledBitmapFromByteArray(inp.readBytes(), 360, 540)
                             if (bmp != null) return@extractEpubCover bmp.asImageBitmap()
                         }
                     }
@@ -168,8 +157,7 @@ object CoverPreviewHelper {
                 }
                 if (byName != null) {
                     zip.getInputStream(byName).use { inp ->
-                        val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
-                        val bmp = BitmapFactory.decodeStream(inp, null, opts)
+                        val bmp = BitmapOptimizer.decodeSampledBitmapFromByteArray(inp.readBytes(), 360, 540)
                         if (bmp != null) return@extractEpubCover bmp.asImageBitmap()
                     }
                 }

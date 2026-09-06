@@ -1,5 +1,9 @@
 package com.iefan.readout.viewmodel
 
+import com.iefan.readout.utils.DocumentText
+import androidx.room.withTransaction
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.currentCoroutineContext
 import android.app.Application
 import android.util.Log
 import android.os.Build
@@ -31,6 +35,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -75,8 +81,18 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private val importMutex = Mutex()
+    private var importJob: Job? = null
+    private val queueDir get() = File(getApplication<Application>().filesDir, "pending_imports").apply { mkdirs() }
+    private val database: AppDatabase
     private val documentRepository: DocumentRepository
     private val ttsEngine: ReadoutTtsEngine
+    val isCompleted get() = ttsEngine.isCompleted
+    val playbackError get() = ttsEngine.playbackError
+    val translationErrors get() = ttsEngine.translationErrors
+    fun clearPlaybackError() = ttsEngine.clearPlaybackError()
+    fun retryTranslation(index: Int) = ttsEngine.retryTranslation(index)
+    fun setOfflineOnly(enabled: Boolean) = ttsEngine.setOfflineOnly(enabled)
 
     // All books / articles in library
     val allDocuments: StateFlow<List<Document>>
@@ -130,7 +146,6 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
     // State bindings straight from TTS Engine
     val isPlaying: StateFlow<Boolean>
     val currentSentenceIndex: StateFlow<Int>
-    val currentWordRange: StateFlow<Pair<Int, Int>?>
     val playbackSpeed: StateFlow<Float>
     val selectedModelTier: StateFlow<String>
     val sleepTimerMinutes: StateFlow<Int>
@@ -152,7 +167,7 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
     val benchmarkResult = _benchmarkResult.asStateFlow()
 
     init {
-        val database = AppDatabase.getDatabase(application)
+        database = AppDatabase.getDatabase(application)
         documentRepository = DocumentRepository(database.documentDao())
         ttsEngine = ReadoutTtsEngine(application)
 
@@ -210,7 +225,6 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
         // Bind flows from Engine to ViewModel State Flows
         isPlaying = ttsEngine.isPlaying
         currentSentenceIndex = ttsEngine.currentSentenceIndex
-        currentWordRange = ttsEngine.currentWordRange
         playbackSpeed = ttsEngine.playbackSpeed
         selectedModelTier = ttsEngine.selectedModelTier
         sleepTimerMinutes = ttsEngine.sleepTimerMinutes
@@ -221,23 +235,18 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
         translationTargetLang = ttsEngine.translationTargetLang
         translatedSentences = ttsEngine.translatedSentences
 
-        // Listen for sentence changes to update Room position with a debounce of 3 seconds
+        // Periodic checkpoints cannot be starved by rapid sentence transitions.
         viewModelScope.launch {
-            currentSentenceIndex.collectLatest { index ->
-                activeDocument.value?.let { doc ->
-                    val sentencesList = _activeSentences.value
-                    if (sentencesList.isNotEmpty() && index < sentencesList.size) {
-                        val currentSentence = sentencesList[index]
-                        delay(3000)
-                        val stillSameDocument = activeDocument.value?.id == doc.id
-                        val stillSameSentence = currentSentenceIndex.value == index
-                        if (isPlaying.value && stillSameDocument && stillSameSentence) {
-                            documentRepository.updatePlaybackPosition(doc.id, currentSentence.start)
-                        }
-                    }
-                }
+            while (true) {
+                delay(2000)
+                if (isPlaying.value) saveCurrentPlaybackPosition()
             }
         }
+        viewModelScope.launch {
+            isPlaying.collect { playing -> if (!playing) saveCurrentPlaybackPosition() }
+        }
+
+        if (queueDir.listFiles()?.any { it.extension == "json" } == true) resumeImports()
 
         // Trigger preloads if we haven't preloaded v4 samples before.
         // Also backfill contentLength for any existing documents that have contentLength <= 0.
@@ -295,7 +304,7 @@ class ReadoutViewModel(application: Application) : AndroidViewModel(application)
                 val tempFile = File(context.cacheDir, "The_Odyssey_by_Homer.epub")
                 context.assets.open("The Odyssey by Homer.epub").use { input ->
                     tempFile.outputStream().use { output ->
-                        input.copyTo(output)
+                        DocumentText.copyLimited(input, output)
                     }
                 }
                 val extracted = extractTextFromEpub(tempFile)
@@ -374,6 +383,7 @@ Here is what this app can do:
             return
         }
 
+        saveCurrentPlaybackPosition()
         documentSelectionJob?.cancel()
         ttsEngine.stop()
         _activeDocument.value = document
@@ -419,6 +429,10 @@ Here is what this app can do:
                 ttsEngine.setModelTier(updatedDoc.selectedModelTier)
                 ttsEngine.setSpeed(updatedDoc.playbackSpeed)
                 ttsEngine.startPlayback()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _importError.value = "Unable to open document: ${e.localizedMessage}"
             } finally {
                 if (_activeDocument.value?.id == document.id) {
                     _isPreparingPlayback.value = false
@@ -428,10 +442,11 @@ Here is what this app can do:
     }
 
     fun seekToBookmark(bookmark: Bookmark) {
-        seekToSentence(bookmark.sentenceIndex)
+        ttsEngine.seekToCharacter(bookmark.charOffset)
     }
 
     fun selectBookmark(bookmark: Bookmark) {
+        saveCurrentPlaybackPosition()
         documentSelectionJob?.cancel()
         documentSelectionJob = viewModelScope.launch {
             try {
@@ -464,7 +479,7 @@ Here is what this app can do:
                     val parsedSentences = getOrParseSentences(updatedDoc)
                     _activeSentences.value = parsedSentences
 
-                    val targetIndex = bookmark.sentenceIndex.coerceIn(0, maxOf(0, parsedSentences.size - 1))
+                    val targetIndex = parsedSentences.indexOfFirst { bookmark.charOffset < it.end }.let { if (it < 0) parsedSentences.lastIndex.coerceAtLeast(0) else it }
                     ttsEngine.loadDocument(updatedDoc.id, parsedSentences, updatedDoc.title, targetIndex)
                     ttsEngine.setModelTier(updatedDoc.selectedModelTier)
                     ttsEngine.setSpeed(updatedDoc.playbackSpeed)
@@ -522,8 +537,9 @@ Here is what this app can do:
         val sentencesList = _activeSentences.value
         if (sentencesList.isNotEmpty() && index < sentencesList.size) {
             val currentSentence = sentencesList[index]
+            val savedPosition = if (ttsEngine.isCompleted.value) sentencesList.last().end else currentSentence.start
             viewModelScope.launch {
-                documentRepository.updatePlaybackPosition(doc.id, currentSentence.start)
+                documentRepository.updatePlaybackPosition(doc.id, savedPosition)
             }
         }
     }
@@ -552,12 +568,6 @@ Here is what this app can do:
             ttsEngine.pausePlayback()
             saveCurrentPlaybackPosition()
         } else {
-            // Restart from beginning if we completed the book
-            val currentIdx = currentSentenceIndex.value
-            val totalSentences = activeSentences.value.size
-            if (totalSentences > 0 && currentIdx >= totalSentences - 1) {
-                seekToSentence(0)
-            }
             ttsEngine.startPlayback()
         }
     }
@@ -650,13 +660,9 @@ Here is what this app can do:
         if (uri == null) return null
         return try {
             val context = getApplication<Application>()
-            val coverFile = File(context.filesDir, "cover_${System.currentTimeMillis()}.png")
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(coverFile).use { output ->
-                    input.copyTo(output)
-                }
-            }
-            coverFile.absolutePath
+            val coverFile = File(context.filesDir, "cover_${System.currentTimeMillis()}.jpg")
+            val success = com.iefan.readout.utils.BitmapOptimizer.saveOptimizedCover(context, uri, coverFile)
+            if (success && coverFile.exists()) coverFile.absolutePath else null
         } catch (e: Exception) {
             e.printStackTrace()
             null
@@ -674,6 +680,7 @@ Here is what this app can do:
         isFavorite: Boolean = false,
         collectionId: Long? = null
     ): Document = withContext(Dispatchers.IO) {
+        require(content.length <= DocumentText.MAX_TEXT_CHARS) { "Document exceeds two million characters." }
         val finalCover = saveCoverFromUri(customCoverUri) ?: coverPath
         val now = System.currentTimeMillis()
         val doc = Document(
@@ -887,7 +894,8 @@ Here is what this app can do:
         isFavorite: Boolean = false,
         collectionId: Long? = null
     ) {
-        viewModelScope.launch {
+        if (importJob?.isActive == true) { _importError.value = "An import is already running."; return }
+        importJob = viewModelScope.launch {
             _isImporting.value = true
             _importProgress.value = ImportTaskProgress(
                 isImporting = true,
@@ -915,15 +923,7 @@ Here is what this app can do:
 
                     val parsedTitle = if (!customTitle.isNullOrBlank()) customTitle else doc.title().ifBlank { cleanUrl }
 
-                    // Strip scripts, headers, menus
-                    doc.select("script, style, header, footer, nav, aside, noscript, iframe").remove()
-                    
-                    val mainContent = doc.select("article, main, .post-content, .mw-parser-output").firstOrNull()
-                    val textToUse = if (mainContent != null) {
-                        mainContent.select("p, h1, h2, h3, h4, h5, h6, li, blockquote").map { it.text().trim() }.filter { it.isNotEmpty() }.joinToString("\n\n")
-                    } else {
-                        doc.select("p, h1, h2, h3, h4, h5, h6, li, blockquote").map { it.text().trim() }.filter { it.isNotEmpty() }.joinToString("\n\n")
-                    }
+                    val textToUse = DocumentText.html(doc)
 
                     if (textToUse.isNotBlank()) {
                         _importProgress.value = _importProgress.value.copy(
@@ -957,6 +957,8 @@ Here is what this app can do:
                         throw IllegalArgumentException("No readable article content found at this URL.")
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 e.printStackTrace()
                 _importError.value = "Failed to import from URL: ${e.localizedMessage ?: "Unknown error"}"
@@ -973,15 +975,17 @@ Here is what this app can do:
         customCoverUri: android.net.Uri? = null,
         isFavorite: Boolean = false,
         collectionId: Long? = null,
-        onProgress: (stage: String, stageFraction: Float) -> Unit
+        onProgress: (stage: String, stageFraction: Float) -> Unit,
+        operationId: String? = null,
+        originalName: String? = null
     ): Document? = withContext(Dispatchers.IO) {
         val context = getApplication<Application>()
         val contentResolver = context.contentResolver
 
         onProgress("Reading file...", 0.10f)
 
-        var fileName = "Imported Document"
-        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+        var fileName = originalName ?: uri.lastPathSegment ?: "Imported Document"
+        if (uri.scheme == "content") contentResolver.query(uri, null, null, null, null)?.use { cursor ->
             val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
             if (nameIndex != -1 && cursor.moveToFirst()) {
                 fileName = cursor.getString(nameIndex)
@@ -992,7 +996,7 @@ Here is what this app can do:
         try {
             contentResolver.openInputStream(uri)?.use { input ->
                 FileOutputStream(tempFile).use { output ->
-                    input.copyTo(output)
+                    DocumentText.copyLimited(input, output)
                 }
             }
 
@@ -1049,7 +1053,7 @@ Here is what this app can do:
             }
 
             if (extracted.content.isBlank()) {
-                throw IllegalArgumentException("No readable text found in $fileName")
+                throw IllegalArgumentException("No readable text found in $fileName. Scanned PDFs need OCR before import.")
             }
 
             onProgress("Analyzing speech structure & chapters...", 0.65f)
@@ -1059,7 +1063,9 @@ Here is what this app can do:
 
             onProgress("Saving to library...", 0.85f)
 
-            val createdDoc = insertDocumentInternal(
+            val createdDoc = database.withTransaction {
+            operationId?.let { id -> database.documentDao().completedOperation(id)?.let { return@withTransaction documentRepository.getDocumentById(it) } }
+            val inserted = insertDocumentInternal(
                 title = titleToUse,
                 content = extracted.content,
                 sourceUrl = fileName,
@@ -1071,6 +1077,9 @@ Here is what this app can do:
                 collectionId = collectionId
             )
 
+            operationId?.let { database.documentDao().completeOperation(CompletedOperation(it, inserted.id)) }
+            inserted
+            }
             onProgress("Complete!", 1.00f)
             createdDoc
         } finally {
@@ -1085,95 +1094,107 @@ Here is what this app can do:
         customCoverUri: android.net.Uri? = null,
         isFavorite: Boolean = false,
         collectionId: Long? = null
-    ) {
-        viewModelScope.launch {
-            _isImporting.value = true
-            _importProgress.value = ImportTaskProgress(
-                isImporting = true,
-                currentItemIndex = 1,
-                totalItems = 1,
-                currentTitle = customTitle ?: "Document",
-                currentStage = "Reading file...",
-                progressFraction = 0.05f
-            )
-            try {
-                val doc = processDocumentFromUri(
-                    uri = uri,
-                    customTitle = customTitle,
-                    customCoverUri = customCoverUri,
-                    isFavorite = isFavorite,
-                    collectionId = collectionId,
-                    onProgress = { stage, frac ->
-                        _importProgress.value = _importProgress.value.copy(
-                            currentStage = stage,
-                            progressFraction = frac
-                        )
+    ) = importDocumentsBatch(listOf(BatchImportItem(uri, customTitle, customCoverUri, isFavorite, collectionId)))
+
+    fun importDocumentsBatch(drafts: List<BatchImportItem>) {
+        if (drafts.isEmpty()) return
+        if (importJob?.isActive == true) {
+            _importError.value = "An import is already running. Wait for it to finish or cancel it."
+            return
+        }
+        importJob = viewModelScope.launch {
+            importMutex.withLock {
+                _isImporting.value = true
+                try {
+                    withContext(Dispatchers.IO) {
+                        drafts.forEachIndexed { index, draft ->
+                            currentCoroutineContext().ensureActive()
+                            _importProgress.value = ImportTaskProgress(true, index + 1, drafts.size, draft.title ?: "Document", "Preparing files...", index.toFloat() / drafts.size)
+                            val id = java.util.UUID.randomUUID().toString()
+                            val staged = File(queueDir, "$id.input")
+                            val resolver = getApplication<Application>().contentResolver
+                            val name = if (draft.uri.scheme == "content") resolver.query(draft.uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                                if (it.moveToFirst()) it.getString(0) else null
+                            } else draft.uri.lastPathSegment
+                            try {
+                                resolver.openInputStream(draft.uri)?.use { input -> staged.outputStream().use { DocumentText.copyLimited(input, it) } }
+                                    ?: error("Cannot read selected file.")
+                                val json = JSONObject().apply {
+                                    put("id", id); put("path", staged.absolutePath); put("name", name ?: "Document.txt")
+                                    put("title", draft.title); put("favorite", draft.isFavorite); put("collection", draft.collectionId)
+                                    put("cover", saveCoverFromUri(draft.customCoverUri))
+                                }
+                                val tmp = File(queueDir, "$id.tmp")
+                                tmp.writeText(json.toString())
+                                check(tmp.renameTo(File(queueDir, "$id.json"))) { "Cannot save import checkpoint." }
+                            } catch (e: Exception) {
+                                staged.delete()
+                                if (e is kotlinx.coroutines.CancellationException) throw e
+                                _importError.value = "Could not prepare ${name ?: "file"}: ${e.message}"
+                            }
+                        }
                     }
-                )
-                delay(150)
-                if (autoSelect && doc != null) {
-                    selectDocument(doc)
+                    drainImportQueue()
+                } finally {
+                    _isImporting.value = false
+                    _importProgress.value = ImportTaskProgress()
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                _importError.value = "Failed to import file: ${e.localizedMessage ?: "Unknown error"}"
-            } finally {
-                _isImporting.value = false
-                _importProgress.value = ImportTaskProgress()
             }
         }
     }
 
-    fun importDocumentsBatch(drafts: List<BatchImportItem>) {
-        if (drafts.isEmpty()) return
-        viewModelScope.launch {
-            _isImporting.value = true
-            val total = drafts.size
-            _importProgress.value = ImportTaskProgress(
-                isImporting = true,
-                currentItemIndex = 1,
-                totalItems = total,
-                currentTitle = drafts.first().title ?: "Document 1",
-                currentStage = "Starting batch import...",
-                progressFraction = 0f
-            )
-            try {
-                for ((index, draft) in drafts.withIndex()) {
-                    val itemNumber = index + 1
-                    val itemTitle = draft.title ?: "Document $itemNumber"
-                    _importProgress.value = ImportTaskProgress(
-                        isImporting = true,
-                        currentItemIndex = itemNumber,
-                        totalItems = total,
-                        currentTitle = itemTitle,
-                        currentStage = "Reading file...",
-                        progressFraction = index.toFloat() / total
-                    )
-                    try {
-                        processDocumentFromUri(
-                            uri = draft.uri,
-                            customTitle = draft.title,
-                            customCoverUri = draft.customCoverUri,
-                            isFavorite = draft.isFavorite,
-                            collectionId = draft.collectionId,
-                            onProgress = { stage, stageFrac ->
-                                val overallFrac = (index + stageFrac) / total
-                                _importProgress.value = _importProgress.value.copy(
-                                    currentStage = stage,
-                                    progressFraction = overallFrac
-                                )
-                            }
-                        )
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                        _importError.value = "Failed to import '$itemTitle': ${e.localizedMessage ?: "Unknown error"}"
-                    }
-                }
-                delay(200)
-            } finally {
-                _isImporting.value = false
-                _importProgress.value = ImportTaskProgress()
+    private fun resumeImports() {
+        importJob = viewModelScope.launch {
+            importMutex.withLock {
+                try { drainImportQueue() }
+                finally { _isImporting.value = false; _importProgress.value = ImportTaskProgress() }
             }
+        }
+    }
+
+    private suspend fun drainImportQueue() = withContext(Dispatchers.IO) {
+        val pending = queueDir.listFiles()?.filter { it.extension == "json" }?.sortedBy { it.lastModified() }.orEmpty()
+        if (pending.isEmpty()) return@withContext
+        _isImporting.value = true
+        val failures = mutableListOf<String>()
+        var imported = 0
+        for ((index, journal) in pending.withIndex()) {
+            currentCoroutineContext().ensureActive()
+            val item = JSONObject(journal.readText())
+            val staged = File(item.getString("path"))
+            try {
+                processDocumentFromUri(
+                    android.net.Uri.fromFile(staged), item.optString("title").takeIf { it.isNotBlank() && it != "null" },
+                    item.optString("cover").takeIf { it.isNotBlank() && it != "null" }?.let { android.net.Uri.fromFile(File(it)) },
+                    item.optBoolean("favorite"), if (item.isNull("collection")) null else item.getLong("collection"),
+                    onProgress = { stage, fraction ->
+                        _importProgress.value = ImportTaskProgress(true, index + 1, pending.size, item.getString("name"), stage, (index + fraction) / pending.size)
+                    }, operationId = "import:" + item.getString("id"), originalName = item.getString("name")
+                )
+                imported++
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e // Keep the checkpoint and staged file for the next app launch.
+            } catch (e: Exception) {
+                failures.add("${item.optString("name")}: ${e.message}")
+            }
+            staged.delete()
+            item.optString("cover").takeIf { it != "null" && it.isNotBlank() }?.let { File(it).delete() }
+            journal.delete()
+        }
+        val summary = "$imported imported, ${failures.size} failed." + if (failures.isEmpty()) "" else "\n" + failures.joinToString("\n")
+        File(getApplication<Application>().filesDir, "last_import_result.txt").writeText(summary)
+        _importError.value = summary
+    }
+
+    fun cancelImports() {
+        val previous = importJob
+        previous?.cancel()
+        importJob = viewModelScope.launch {
+            previous?.join()
+            withContext(Dispatchers.IO) { queueDir.listFiles()?.forEach { it.delete() } }
+            _isImporting.value = false
+            _importProgress.value = ImportTaskProgress()
+            _importError.value = "Import cancelled. Documents already imported remain in your library."
         }
     }
 
@@ -1228,31 +1249,35 @@ Here is what this app can do:
         var reader: PdfReader? = null
         try {
             val stream = file.inputStream()
-            reader = PdfReader(stream)
+            reader = stream.use { PdfReader(it) }
+            require(reader.numberOfPages <= 3000) { "PDF exceeds 3,000 pages." }
             val numberOfPages = reader.numberOfPages
             val textBuilder = StringBuilder()
             val pageStartOffsets = mutableListOf<Int>()
             pageStartOffsets.add(0) // page 0 placeholder
             
             for (i in 1..numberOfPages) {
+                currentCoroutineContext().ensureActive()
+                require(textBuilder.length <= DocumentText.MAX_TEXT_CHARS) { "Document exceeds two million characters." }
                 val pageText = PdfTextExtractor.getTextFromPage(reader, i)
                 val cleanedPageText = if (pageText != null) cleanTextParagraphs(pageText) else ""
                 
-                pageStartOffsets.add(textBuilder.length)
                 
                 if (cleanedPageText.isNotEmpty()) {
                     if (textBuilder.isNotEmpty()) {
                         textBuilder.append("\n\n")
                     }
+                    pageStartOffsets.add(textBuilder.length)
                     textBuilder.append(cleanedPageText)
+                } else {
+                    pageStartOffsets.add(textBuilder.length)
                 }
             }
             val content = textBuilder.toString()
             val chapters = ChapterExtractor.extractChaptersFromPdf(file, content, pageStartOffsets)
             ExtractedDocument(content, chapters)
         } catch (e: Exception) {
-            e.printStackTrace()
-            ExtractedDocument("", emptyList())
+            throw e
         } finally {
             reader?.close()
         }
@@ -1261,32 +1286,16 @@ Here is what this app can do:
     private suspend fun extractTextFromDocx(file: File): ExtractedDocument = withContext(Dispatchers.IO) {
         try {
             java.util.zip.ZipFile(file).use { zip ->
+                DocumentText.validateZip(zip)
                 val entry = zip.getEntry("word/document.xml") ?: return@withContext ExtractedDocument("", emptyList())
                 zip.getInputStream(entry).use { stream ->
-                    val xml = stream.bufferedReader(Charsets.UTF_8).readText()
-                    val doc = Jsoup.parse(xml, "", org.jsoup.parser.Parser.xmlParser())
-                    val result = StringBuilder()
-                    
-                    val paragraphs = doc.select("*|p")
-                    for (p in paragraphs) {
-                        val pBuilder = StringBuilder()
-                        val texts = p.select("*|t")
-                        for (t in texts) {
-                            pBuilder.append(t.text())
-                        }
-                        val pText = pBuilder.toString().trim()
-                        if (pText.isNotEmpty()) {
-                            result.append(pText).append("\n\n")
-                        }
-                    }
-                    val content = cleanTextParagraphs(result.toString())
+                    val content = DocumentText.docx(DocumentText.read(stream))
                     val chapters = ChapterExtractor.extractChaptersFromText(content)
                     ExtractedDocument(content, chapters)
                 }
             }
         } catch (e: Exception) {
-            e.printStackTrace()
-            ExtractedDocument("", emptyList())
+            throw e
         }
     }
 
@@ -1294,15 +1303,16 @@ Here is what this app can do:
         try {
             val result = StringBuilder()
             java.util.zip.ZipFile(file).use { zip ->
+                DocumentText.validateZip(zip)
                 val entries = zip.entries().toList()
                 
                 // Try to parse the OPF spine sequence for the correct reading order
-                val opfEntry = entries.firstOrNull { it.name.lowercase().endsWith(".opf") }
+                val opfEntry = zip.getEntry(DocumentText.opfPath(zip))
                 val resolvedEntries = mutableListOf<java.util.zip.ZipEntry>()
                 
                 if (opfEntry != null) {
                     try {
-                        val opfContent = zip.getInputStream(opfEntry).bufferedReader(Charsets.UTF_8).readText()
+                        val opfContent = zip.getInputStream(opfEntry).use { DocumentText.read(it) }
                         val opfDir = opfEntry.name.substringBeforeLast("/", "")
                         val doc = org.jsoup.Jsoup.parse(opfContent, "", org.jsoup.parser.Parser.xmlParser())
                         
@@ -1321,7 +1331,7 @@ Here is what this app can do:
                             val idref = itemref.attr("idref")
                             val href = manifestMap[idref] ?: continue
                             val cleanHref = href.substringBefore("#")
-                            val fullPath = if (opfDir.isEmpty()) cleanHref else "$opfDir/$cleanHref"
+                            val fullPath = DocumentText.resolveEntry(opfEntry.name, cleanHref)
                             
                             var entry = zip.getEntry(fullPath)
                             if (entry == null) {
@@ -1331,12 +1341,11 @@ Here is what this app can do:
                                 } catch (_: Exception) {}
                             }
                             
-                            if (entry != null && !entry.isDirectory) {
-                                resolvedEntries.add(entry)
-                            }
+                            require(entry != null && !entry.isDirectory) { "EPUB section is missing: $fullPath" }
+                            resolvedEntries.add(entry)
                         }
                     } catch (e: Exception) {
-                        Log.e("ReadoutViewModel", "Failed to parse EPUB spine reading order, falling back to alphabetical", e)
+                        throw IllegalArgumentException("Cannot read EPUB spine: ${e.message}", e)
                     }
                 }
                 
@@ -1354,8 +1363,10 @@ Here is what this app can do:
                 if (textEntries.isEmpty()) return@withContext ExtractedDocument("", emptyList())
 
                 for (entry in textEntries) {
+                    currentCoroutineContext().ensureActive()
+                    require(result.length <= DocumentText.MAX_TEXT_CHARS) { "Document exceeds two million characters." }
                     zip.getInputStream(entry).use { stream ->
-                        val htmlContent = stream.bufferedReader(Charsets.UTF_8).readText()
+                        val htmlContent = DocumentText.read(stream)
                         val cleanText = extractParagraphsFromHtml(htmlContent)
                         if (cleanText.isNotBlank()) {
                             result.append(cleanText).append("\n\n")
@@ -1367,20 +1378,20 @@ Here is what this app can do:
             val chapters = ChapterExtractor.extractChaptersFromEpub(file, content)
             ExtractedDocument(content, chapters)
         } catch (e: Exception) {
-            e.printStackTrace()
-            ExtractedDocument("", emptyList())
+            throw e
         }
     }
 
     private suspend fun extractEpubCover(file: File): String? = withContext(Dispatchers.IO) {
         try {
             java.util.zip.ZipFile(file).use { zip ->
+                DocumentText.validateZip(zip)
                 val entries = zip.entries().toList()
 
                 // Strategy 1: Parse OPF manifest
-                val opfEntry = entries.firstOrNull { it.name.lowercase().endsWith(".opf") }
+                val opfEntry = zip.getEntry(DocumentText.opfPath(zip))
                 if (opfEntry != null) {
-                    val opfContent = zip.getInputStream(opfEntry).bufferedReader(Charsets.UTF_8).readText()
+                    val opfContent = zip.getInputStream(opfEntry).use { DocumentText.read(it) }
                     val opfDir = opfEntry.name.substringBeforeLast("/", "")
 
                     val coverHref =
@@ -1446,45 +1457,11 @@ Here is what this app can do:
     }
 
     private suspend fun extractTextFromHtml(file: File): ExtractedDocument = withContext(Dispatchers.IO) {
-        val content = try {
-            val rawHtml = file.readText(Charsets.UTF_8)
-            extractParagraphsFromHtml(rawHtml)
-        } catch (e: Exception) {
-            try {
-                val rawHtml = file.readText(Charsets.ISO_8859_1)
-                extractParagraphsFromHtml(rawHtml)
-            } catch (ex: Exception) {
-                ""
-            }
-        }
-        val chapters = ChapterExtractor.extractChaptersFromText(content)
-        ExtractedDocument(content, chapters)
+        val content = file.inputStream().use { DocumentText.html(DocumentText.read(it)) }
+        ExtractedDocument(content, ChapterExtractor.extractChaptersFromText(content))
     }
 
-    private fun extractParagraphsFromHtml(html: String): String {
-        try {
-            val doc = Jsoup.parse(html)
-            doc.select("script, style, head, header, footer, nav, iframe, noscript").remove()
-            
-            val result = StringBuilder()
-            val blocks = doc.select("p, h1, h2, h3, h4, h5, h6, li, blockquote, pre")
-            if (blocks.isNotEmpty()) {
-                for (block in blocks) {
-                    val pText = block.text().trim()
-                    if (pText.isNotEmpty()) {
-                        result.append(pText).append("\n\n")
-                    }
-                }
-            } else {
-                val text = doc.body()?.text() ?: doc.text()
-                result.append(text)
-            }
-            return result.toString()
-        } catch (e: Exception) {
-            e.printStackTrace()
-            return ""
-        }
-    }
+    private fun extractParagraphsFromHtml(html: String): String = DocumentText.html(html)
 
     private suspend fun generatePdfCover(file: File): String? = withContext(Dispatchers.IO) {
         var pfd: ParcelFileDescriptor? = null
@@ -1518,17 +1495,8 @@ Here is what this app can do:
     }
 
     private suspend fun extractTextFromTxt(file: File): ExtractedDocument = withContext(Dispatchers.IO) {
-        val content = try {
-            file.readText(Charsets.UTF_8)
-        } catch (e: Exception) {
-            try {
-                file.readText(Charsets.ISO_8859_1)
-            } catch (ex: Exception) {
-                ""
-            }
-        }
-        val chapters = ChapterExtractor.extractChaptersFromText(content)
-        ExtractedDocument(content, chapters)
+        val content = file.inputStream().use { DocumentText.read(it) }
+        ExtractedDocument(content, ChapterExtractor.extractChaptersFromText(content))
     }
 
     fun updateBookDetails(documentId: Long, newTitle: String, newCoverUri: android.net.Uri?, removeCover: Boolean) {
@@ -1538,18 +1506,15 @@ Here is what this app can do:
                 var coverPath = if (removeCover) null else doc.coverPath
                 
                 if (newCoverUri != null && !removeCover) {
-                    val context = getApplication<Application>()
-                    val contentResolver = context.contentResolver
-                    val tempFile = File(context.filesDir, "cover_${System.currentTimeMillis()}.png")
-                    try {
-                        contentResolver.openInputStream(newCoverUri)?.use { input ->
-                            FileOutputStream(tempFile).use { output ->
-                                input.copyTo(output)
-                            }
+                    coverPath = withContext(Dispatchers.IO) { saveCoverFromUri(newCoverUri) } ?: coverPath
+                }
+                if (doc.coverPath != coverPath) {
+                    withContext(Dispatchers.IO) {
+                        doc.coverPath?.let { path ->
+                            val file = File(path)
+                            if (file.canonicalFile.parentFile == getApplication<Application>().filesDir.canonicalFile) file.delete()
+                            com.iefan.readout.utils.CoverCache.remove(path)
                         }
-                        coverPath = tempFile.absolutePath
-                    } catch (e: Exception) {
-                        e.printStackTrace()
                     }
                 }
 
@@ -1572,17 +1537,18 @@ Here is what this app can do:
             }
     }
 
-    suspend fun exportBackupData(): String = withContext(Dispatchers.IO) {
+    suspend fun exportBackupData(): String = withContext(Dispatchers.IO) { database.withTransaction {
         val rootJson = JSONObject()
         
         // 1. Export Documents
         val documentsArray = JSONArray()
-        val docsList = allDocuments.value
-        val bookmarksList = allBookmarks.value
+        val docsList = documentRepository.allDocuments.first()
+        val bookmarksList = documentRepository.getAllBookmarksFlow().first()
         
         for (metaDoc in docsList) {
             val fullDoc = documentRepository.getDocumentById(metaDoc.id) ?: continue
             val docJson = JSONObject().apply {
+                put("id", fullDoc.id.toString())
                 put("title", fullDoc.title)
                 put("content", fullDoc.content)
                 put("sourceUrl", fullDoc.sourceUrl)
@@ -1590,7 +1556,13 @@ Here is what this app can do:
                 put("playbackPosition", fullDoc.playbackPosition)
                 put("selectedModelTier", fullDoc.selectedModelTier)
                 put("playbackSpeed", fullDoc.playbackSpeed)
-                put("coverPath", fullDoc.coverPath)
+                fullDoc.coverPath?.let { path ->
+                    val file = File(path)
+                    if (file.canonicalFile.parentFile == getApplication<Application>().filesDir.canonicalFile && file.exists()) {
+                        require(file.length() <= 2 * 1024 * 1024) { "Cover is too large for backup. Edit the cover first." }
+                        put("coverData", android.util.Base64.encodeToString(file.readBytes(), android.util.Base64.NO_WRAP))
+                    }
+                }
                 put("lastReadTime", fullDoc.lastReadTime)
                 put("isFavorite", fullDoc.isFavorite)
                 put("contentLength", fullDoc.contentLength)
@@ -1627,11 +1599,12 @@ Here is what this app can do:
         
         // 2. Export Collections
         val collectionsArray = JSONArray()
-        val collectionsList = allCollections.value
-        val crossRefsList = allCrossRefs.value
+        val collectionsList = documentRepository.allCollections.first()
+        val crossRefsList = documentRepository.allCrossRefs.first()
         
         for (col in collectionsList) {
             val colJson = JSONObject().apply {
+                put("id", col.id.toString())
                 put("name", col.name)
                 put("addedDate", col.addedDate)
             }
@@ -1644,34 +1617,66 @@ Here is what this app can do:
                     documentTitlesArray.put(docTitle)
                 }
             }
-            colJson.put("documentTitles", documentTitlesArray)
+            colJson.put("documentIds", JSONArray(docIdsInCol.map { it.toString() }))
             collectionsArray.put(colJson)
         }
         rootJson.put("collections", collectionsArray)
         
-        rootJson.toString(2)
-    }
+        rootJson.put("version", 2)
+        val prefs = getApplication<Application>().getSharedPreferences("readout_prefs", android.content.Context.MODE_PRIVATE)
+        rootJson.put("settings", JSONObject().apply {
+            put("theme_color", prefs.getInt("theme_color", OledPrimary.toArgb()))
+            put("selected_voice_id", prefs.getString("selected_voice_id", "default"))
+            put("translation_target_lang", prefs.getString("translation_target_lang", "none"))
+            put("offline_only", prefs.getBoolean("offline_only", true))
+            put("selected_voice_tier", prefs.getString("selected_voice_tier", "HIGH_FIDELITY"))
+            put("collection_order", prefs.getString("collection_order", ""))
+        })
+        rootJson.toString()
+    } }
 
     suspend fun importBackupData(jsonString: String): Boolean = withContext(Dispatchers.IO) {
+        val createdCovers = mutableListOf<File>()
+        var committed = false
         try {
+            require(jsonString.length <= 64 * 1024 * 1024) { "Backup exceeds 64 MB." }
             val rootJson = JSONObject(jsonString)
+            val version = rootJson.optInt("version", 1)
+            require(version in 1..2 && rootJson.has("documents")) { "Unsupported backup format." }
+            val receipt = "backup:" + java.security.MessageDigest.getInstance("SHA-256").digest(jsonString.toByteArray()).joinToString("") { "%02x".format(it) }
+            val collectionIds = mutableMapOf<String, Long>()
+            database.withTransaction {
+            if (database.documentDao().completedOperation(receipt) != null) return@withTransaction
+
             
             val documentsArray = rootJson.optJSONArray("documents") ?: JSONArray()
             val titleToNewIdMap = mutableMapOf<String, Long>()
+            val idToNewIdMap = mutableMapOf<String, Long>()
             
             for (i in 0 until documentsArray.length()) {
                 val docJson = documentsArray.getJSONObject(i)
                 val title = docJson.getString("title")
                 val content = docJson.getString("content")
+                require(content.length <= DocumentText.MAX_TEXT_CHARS) { "Document exceeds the text limit." }
+                val exportedId = if (version == 2) docJson.getString("id") else title
+                require(!idToNewIdMap.containsKey(exportedId)) { "Legacy backups with duplicate titles cannot be restored safely. Export a new backup." }
                 val sourceUrl = if (docJson.has("sourceUrl") && !docJson.isNull("sourceUrl")) docJson.getString("sourceUrl") else null
                 val addedDate = docJson.optLong("addedDate", System.currentTimeMillis())
-                val playbackPosition = docJson.optInt("playbackPosition", 0)
+                val playbackPosition = docJson.optInt("playbackPosition", 0).coerceIn(0, content.length)
                 val selectedModelTier = docJson.optString("selectedModelTier", "HIGH_FIDELITY")
-                val playbackSpeed = docJson.optDouble("playbackSpeed", 1.0).toFloat()
-                val coverPath = if (docJson.has("coverPath") && !docJson.isNull("coverPath")) docJson.getString("coverPath") else null
+                val playbackSpeed = docJson.optDouble("playbackSpeed", 1.0).toFloat().also { require(it.isFinite() && it in 0.5f..4.5f) }
+                val coverPath = if (docJson.has("coverData")) {
+                    val encoded = docJson.getString("coverData")
+                    require(encoded.length <= 3 * 1024 * 1024) { "Backup cover exceeds size limit." }
+                    val bytes = android.util.Base64.decode(encoded, android.util.Base64.DEFAULT)
+                    val file = File(getApplication<Application>().filesDir, "cover_${java.util.UUID.randomUUID()}.jpg")
+                    createdCovers.add(file)
+                    file.writeBytes(bytes)
+                    file.absolutePath
+                } else null
                 val lastReadTime = docJson.optLong("lastReadTime", System.currentTimeMillis())
                 val isFavorite = docJson.optBoolean("isFavorite", false)
-                val contentLength = docJson.optInt("contentLength", content.length)
+                val contentLength = content.length
                 
                 val doc = Document(
                     title = title,
@@ -1689,6 +1694,7 @@ Here is what this app can do:
                 
                 val newDocId = documentRepository.insert(doc)
                 titleToNewIdMap[title] = newDocId
+                idToNewIdMap[exportedId] = newDocId
                 
                 // Nest Bookmarks
                 val bookmarksArray = docJson.optJSONArray("bookmarks") ?: JSONArray()
@@ -1733,17 +1739,33 @@ Here is what this app can do:
                 val col = CollectionEntity(name = name, addedDate = addedDate)
                 val newColId = documentRepository.insertCollection(col)
                 
-                val documentTitlesArray = colJson.optJSONArray("documentTitles") ?: JSONArray()
+                collectionIds[colJson.optString("id", name)] = newColId
+                val documentTitlesArray = colJson.optJSONArray(if (version == 2) "documentIds" else "documentTitles") ?: JSONArray()
                 for (j in 0 until documentTitlesArray.length()) {
                     val docTitle = documentTitlesArray.getString(j)
-                    val newDocId = titleToNewIdMap[docTitle]
-                    if (newDocId != null) {
-                        documentRepository.addDocumentToCollection(newDocId, newColId)
-                    }
+                    val newDocId = (if (version == 2) idToNewIdMap[docTitle] else titleToNewIdMap[docTitle])
+                        ?: error("Backup collection refers to a missing document.")
+                    documentRepository.addDocumentToCollection(newDocId, newColId)
+                }
+            }
+            database.documentDao().completeOperation(CompletedOperation(receipt, 0))
+            }
+            committed = true
+            rootJson.optJSONObject("settings")?.let { settings ->
+                withContext(Dispatchers.Main) {
+                    setThemeColor(Color(settings.optInt("theme_color", OledPrimary.toArgb())))
+                    setSelectedVoiceId(settings.optString("selected_voice_id", "default"))
+                    setTranslationTargetLang(settings.optString("translation_target_lang", "none"))
+                    setOfflineOnly(settings.optBoolean("offline_only", true))
+                    setModelTier(settings.optString("selected_voice_tier", "HIGH_FIDELITY"))
+                    val order = settings.optString("collection_order", "").split(',').mapNotNull { collectionIds[it] }
+                    if (order.isNotEmpty()) reorderCollections(order)
                 }
             }
             true
         } catch (e: Exception) {
+            if (!committed) createdCovers.forEach { it.delete() }
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Log.e("ReadoutViewModel", "Failed to import backup data", e)
             false
         }
@@ -1774,9 +1796,13 @@ Here is what this app can do:
     }
 
     private fun putCachedSentences(document: Document, sentences: List<SpeechSentence>) {
+        if (document.content.length > 500_000) return
         val contentHash = document.content.hashCode()
         synchronized(sentenceCache) {
             sentenceCache[document.id] = CachedSentences(contentHash, sentences)
+            while (sentenceCache.values.sumOf { it.sentences.lastOrNull()?.end ?: 0 } > 1_000_000) {
+                sentenceCache.remove(sentenceCache.keys.first())
+            }
         }
     }
 
@@ -1787,7 +1813,7 @@ Here is what this app can do:
             } catch (e: Exception) {
                 null
             } ?: return@forEach
-            if (getCachedSentences(fullDoc) == null && fullDoc.content.isNotBlank()) {
+            if (getCachedSentences(fullDoc) == null && fullDoc.content.isNotBlank() && fullDoc.content.length <= 500_000) {
                 val parsed = withContext(Dispatchers.Default) {
                     DocumentParser.parse(fullDoc.content)
                 }

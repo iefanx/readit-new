@@ -17,8 +17,8 @@ android {
     applicationId = "com.iefan.readout"
     minSdk = 24
     targetSdk = 36
-    versionCode = 36
-    versionName = "1.6.0"
+    versionCode = 40
+    versionName = "1.7.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -36,6 +36,11 @@ android {
       stream.close()
   }
 
+  val signingProperties = Properties().apply {
+    val config = rootProject.file(".gradle-local/release-signing.properties")
+    if (config.exists()) config.inputStream().use { load(it) }
+  }
+
   signingConfigs {
     create("release") {
       val keystorePath = System.getenv("KEYSTORE_PATH") 
@@ -46,19 +51,16 @@ android {
         storeFile = keystoreFile
         storePassword = System.getenv("STORE_PASSWORD") 
             ?: localProperties.getProperty("STORE_PASSWORD") 
-            ?: "readoutpassword"
+            ?: signingProperties.getProperty("STORE_PASSWORD")
         keyAlias = System.getenv("KEY_ALIAS") 
             ?: localProperties.getProperty("KEY_ALIAS") 
-            ?: "readout-upload"
+            ?: signingProperties.getProperty("KEY_ALIAS")
         keyPassword = System.getenv("KEY_PASSWORD") 
             ?: localProperties.getProperty("KEY_PASSWORD") 
-            ?: "readoutpassword"
+            ?: signingProperties.getProperty("KEY_PASSWORD")
       } else {
-        // Fallback to debug configuration so it compiles out-of-the-box
-        storeFile = file("${rootDir}/debug.keystore")
-        storePassword = "android"
-        keyAlias = "androiddebugkey"
-        keyPassword = "android"
+        // No debug signing fallback: release validation fails without an explicit key.
+        storeFile = keystoreFile
       }
     }
     create("debugConfig") {
@@ -160,3 +162,6 @@ dependencies {
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
 }
+
+
+ksp { arg("room.schemaLocation", "$projectDir/schemas") }

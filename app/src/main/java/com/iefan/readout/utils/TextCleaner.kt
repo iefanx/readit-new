@@ -17,25 +17,26 @@ object TextCleaner {
     private val MULTIPLE_SPACES_REGEX = Regex(" {2,}")
     private val SPACE_BEFORE_PUNCT_REGEX = Regex(" +([.,!?;:])")
 
-    fun clean(text: String): String {
+    @JvmOverloads
+    fun clean(text: String, removeAnnotations: Boolean = false): String {
         if (text.isBlank()) return text
 
         // 1. Process line by line to remove page numbers/headers
         val lines = text.split("\n")
         val cleanedLines = lines.map { line ->
             val trimmed = line.trim()
-            if (isPageNumberOrHeader(trimmed)) {
+            if (removeAnnotations && isPageNumberOrHeader(trimmed)) {
                 "" // strip page numbers
             } else {
                 // Remove URLs within the line
-                line.replace(URL_REGEX, "")
+                if (removeAnnotations) line.replace(URL_REGEX, "") else line
             }
         }
 
         val joined = cleanedLines.joinToString("\n")
 
         // 2. Remove bracketed citations [1], [1,2], [1-3] etc.
-        val withoutCitations = joined.replace(CITATION_BRACKETS_REGEX, "")
+        val withoutCitations = if (removeAnnotations) joined.replace(CITATION_BRACKETS_REGEX, "") else joined
 
         // 3. Clean up multiple consecutive spaces (collapsing them) while keeping newlines intact
         val collapsed = withoutCitations.split("\n")

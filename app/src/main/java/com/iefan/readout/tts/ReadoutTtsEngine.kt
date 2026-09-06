@@ -24,12 +24,19 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
+import org.json.JSONObject
+import org.jsoup.Jsoup
+import org.jsoup.parser.Parser
 
 enum class VoiceStatus {
     DOWNLOADED,
@@ -44,7 +51,7 @@ data class VoiceInfo(
     val locale: Locale
 )
 
-class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListener {
+class ReadoutTtsEngine(private val context: Context, private val translator: (suspend (String, String) -> String?)? = null) : TextToSpeech.OnInitListener {
 
     companion object {
         @Volatile
@@ -62,7 +69,7 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
         private set
 
     val currentCharacterIndex: Int
-        get() = _currentWordRange.value?.first ?: (sentences.getOrNull(_currentSentenceIndex.value)?.start ?: 0)
+        get() = if (_isCompleted.value) totalCharacters else (sentences.getOrNull(_currentSentenceIndex.value)?.start ?: 0)
 
     val sentencesSize: Int
         get() = sentences.size
@@ -85,7 +92,6 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
                 resumeOnFocusGain = _isPlaying.value
                 invalidatePlaybackState(stopAudio = true)
                 _isPlaying.value = false
-                _currentWordRange.value = null
                 // Do not abandon audio focus so AUDIOFOCUS_GAIN can resume
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
@@ -148,8 +154,46 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
     private val _currentSentenceIndex = MutableStateFlow(0)
     val currentSentenceIndex = _currentSentenceIndex.asStateFlow()
 
-    private val _currentWordRange = MutableStateFlow<Pair<Int, Int>?>(null)
-    val currentWordRange = _currentWordRange.asStateFlow()
+    private val _isCompleted = MutableStateFlow(false)
+    val isCompleted = _isCompleted.asStateFlow()
+    private val _playbackError = MutableStateFlow<String?>(null)
+    val playbackError = _playbackError.asStateFlow()
+    private val _translationErrors = MutableStateFlow<Map<Int, String>>(emptyMap())
+    val translationErrors = _translationErrors.asStateFlow()
+    private var translationGeneration = 0L
+    private var preparationJob: Job? = null
+    private var queueJob: Job? = null
+    private var offlineOnly = context.getSharedPreferences("readout_prefs", Context.MODE_PRIVATE).getBoolean("offline_only", true)
+
+    fun clearPlaybackError() { _playbackError.value = null }
+
+    fun setOfflineOnly(enabled: Boolean) {
+        offlineOnly = enabled
+        context.getSharedPreferences("readout_prefs", Context.MODE_PRIVATE).edit().putBoolean("offline_only", enabled).apply()
+        if (_isPlaying.value) startPlayback()
+        else configureVoiceForTier(_selectedModelTier.value)
+    }
+
+    private fun resetTranslations() {
+        translationGeneration++
+        preparationJob?.cancel()
+        translationPrefetchJob?.cancel()
+        translationClient.dispatcher.cancelAll()
+        spokenSentenceTextMap.clear()
+        _translatedSentences.value = emptyMap()
+        _translationErrors.value = emptyMap()
+    }
+
+    fun retryTranslation(index: Int) {
+        _translationErrors.value = _translationErrors.value - index
+        preparationJob?.cancel()
+        preparationJob = scope.launch { prepareSpokenText(index) }
+    }
+
+    private fun failPlayback(message: String) {
+        pausePlayback()
+        _playbackError.value = message
+    }
 
     private val _playbackSpeed = MutableStateFlow(1.0f)
     val playbackSpeed = _playbackSpeed.asStateFlow()
@@ -172,7 +216,7 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
     private val _translatedSentences = MutableStateFlow<Map<Int, String>>(emptyMap())
     val translatedSentences = _translatedSentences.asStateFlow()
 
-    private val spokenSentenceTextMap = java.util.concurrent.ConcurrentHashMap<Int, String>()
+    private val spokenSentenceTextMap = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     private var sentences: List<SpeechSentence> = emptyList()
 
@@ -183,8 +227,8 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
     val sleepTimerRemainingSeconds = _sleepTimerRemainingSeconds.asStateFlow()
 
     private var timerJob: Job? = null
-    private var wordHighlightJob: Job? = null
     private var watchdogJob: Job? = null
+    private var translationPrefetchJob: Job? = null
     private val enqueueMutex = Mutex()
 
     @Volatile
@@ -224,14 +268,24 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
     }
 
     fun setTranslationTargetLang(langCode: String) {
+        resetTranslations()
         _translationTargetLang.value = langCode
-        _translatedSentences.value = emptyMap()
         if (langCode.isNotEmpty() && langCode != "none") {
             downloadLanguagePackIfNeeded(Locale.forLanguageTag(langCode))
         }
         configureVoiceForLanguage(langCode)
         if (_isPlaying.value) {
             restartPlaybackFromCurrentSentence()
+        } else {
+            // When paused, immediately translate current sentence & prefetch next sentences
+            // so KaraokeView updates immediately for the user
+            if (langCode.isNotEmpty() && langCode != "none" && sentences.isNotEmpty()) {
+                val curIdx = _currentSentenceIndex.value
+                preparationJob = scope.launch {
+                    prepareSpokenText(curIdx)
+                    prefetchTranslationsAhead(curIdx + 1)
+                }
+            }
         }
     }
 
@@ -297,149 +351,84 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            val result = tts?.setLanguage(Locale.US)
+            val initialLocale = Locale.getDefault()
+            val result = tts?.setLanguage(initialLocale)
             if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                Log.e("ReadoutTtsEngine", "English language is not supported or missing data.")
+                _playbackError.value = "Install a text-to-speech voice for your device language in Android settings."
             } else {
                 setupProgressListener()
                 _isInitialized.value = true
                 Log.d("ReadoutTtsEngine", "TTS initialized successfully.")
-                updateAvailableVoicesForLocale(Locale.US)
+                updateAvailableVoicesForLocale(initialLocale)
                 configureVoiceForTier(_selectedModelTier.value)
                 if (pendingStartPlayback && sentences.isNotEmpty()) {
                     pendingStartPlayback = false
-                    restartPlaybackFromCurrentSentence()
+                    startPlayback()
                 }
             }
         } else {
-            Log.e("ReadoutTtsEngine", "TTS initialization failed.")
+            _playbackError.value = "Speech engine unavailable. Install or enable a text-to-speech engine in Android settings."
         }
     }
 
     private fun setupProgressListener() {
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {
+            override fun onStart(utteranceId: String?) { scope.launch {
                 if (utteranceId?.startsWith("preview:") == true) {
                     _previewingVoiceId.value = utteranceId.substringAfter("preview:")
-                    return
+                    return@launch
                 }
-                wordHighlightJob?.cancel()
-                val playbackState = parseUtteranceId(utteranceId) ?: return
-                if (playbackState.token != activePlaybackToken) return
-
-                // Cancel any pending stall watchdog immediately on start of any sentence
+                val state = parseUtteranceId(utteranceId) ?: return@launch
+                if (state.token != activePlaybackToken) return@launch
                 watchdogJob?.cancel()
-                watchdogJob = null
-
-                _currentSentenceIndex.value = playbackState.sentenceIndex
-                _currentWordRange.value = null
+                _currentSentenceIndex.value = state.sentenceIndex
                 _isPlaying.value = true
+                enqueueSentencesUpTo(state.sentenceIndex + 2, state.token)
+                prefetchTranslationsAhead(state.sentenceIndex + 3)
+            } }
 
-                // Keep prebuffering sliding window ahead: buffer up to sentenceIndex + 2
-                enqueueSentencesUpTo(playbackState.sentenceIndex + 2, playbackState.token)
-                prefetchTranslationsAhead(playbackState.sentenceIndex + 3)
-            }
-
-            override fun onDone(utteranceId: String?) {
+            override fun onDone(utteranceId: String?) { scope.launch {
                 if (utteranceId?.startsWith("preview:") == true) {
                     _previewingVoiceId.value = null
-                    return
+                    return@launch
                 }
-                val playbackState = parseUtteranceId(utteranceId) ?: return
-                if (playbackState.token != activePlaybackToken) return
-
-                if (playbackState.sentenceIndex >= sentences.lastIndex) {
-                    val finalSentence = sentences.getOrNull(playbackState.sentenceIndex)
+                val state = parseUtteranceId(utteranceId) ?: return@launch
+                if (state.token != activePlaybackToken || !state.lastChunk) return@launch
+                if (state.sentenceIndex >= sentences.lastIndex) {
+                    _isCompleted.value = true
                     _isPlaying.value = false
-                    _currentWordRange.value = finalSentence?.let { Pair(it.end, it.end) }
                     stopPlaybackService()
                     abandonAudioFocus()
                 } else {
-                    // Safety-net watchdog: Android TTS already has the next sentence queued with QUEUE_ADD
-                    // and will transition seamlessly with 0ms gap.
-                    // If hardware or engine stalls for >2500ms without onStart, recover automatically.
-                    val nextIndex = playbackState.sentenceIndex + 1
                     watchdogJob?.cancel()
                     watchdogJob = scope.launch {
-                        delay(2500)
-                        if (playbackState.token == activePlaybackToken && _isPlaying.value && _currentSentenceIndex.value <= playbackState.sentenceIndex) {
-                            Log.w("ReadoutTtsEngine", "Playback stall watchdog: recovering at sentence $nextIndex")
-                            startPlaybackAtSentence(nextIndex)
+                        delay(15000)
+                        if (state.token == activePlaybackToken && _isPlaying.value && _currentSentenceIndex.value <= state.sentenceIndex) {
+                            failPlayback("Speech stopped responding. Tap play to retry this sentence.")
                         }
                     }
                 }
-            }
+            } }
 
             @Deprecated("Deprecated in Java")
-            override fun onError(utteranceId: String?) {
+            override fun onError(utteranceId: String?) { scope.launch {
                 if (utteranceId?.startsWith("preview:") == true) {
                     _previewingVoiceId.value = null
-                    return
+                    _playbackError.value = "Voice preview failed. Check the installed voice or connection."
+                    return@launch
                 }
-                Log.e("ReadoutTtsEngine", "TTS error on sentence $utteranceId")
-                val playbackState = parseUtteranceId(utteranceId) ?: return
-                if (playbackState.token != activePlaybackToken) return
-                watchdogJob?.cancel()
-                watchdogJob = null
-
-                // Attempt graceful recovery by advancing to next sentence
-                val nextIndex = playbackState.sentenceIndex + 1
-                if (nextIndex in sentences.indices && _isPlaying.value) {
-                    Log.d("ReadoutTtsEngine", "Recovering from TTS error by advancing to sentence $nextIndex")
-                    startPlaybackAtSentence(nextIndex)
-                } else {
-                    _isPlaying.value = false
-                    _currentWordRange.value = null
-                    stopPlaybackService()
-                    abandonAudioFocus()
+                val state = parseUtteranceId(utteranceId) ?: return@launch
+                if (state.token == activePlaybackToken) {
+                    failPlayback("Speech failed. Tap play to retry, or choose another installed voice.")
                 }
-            }
-
-            override fun onRangeStart(utteranceId: String?, start: Int, end: Int, frame: Int) {
-                if (utteranceId?.startsWith("preview:") == true) return
-                val playbackState = parseUtteranceId(utteranceId) ?: return
-                if (playbackState.token != activePlaybackToken) return
-
-                val sentence = sentences.getOrNull(playbackState.sentenceIndex) ?: return
-                val spokenText = spokenSentenceTextMap[playbackState.sentenceIndex] ?: sentence.text
-
-                wordHighlightJob?.cancel()
-                wordHighlightJob = scope.launch {
-                    val speed = _playbackSpeed.value.coerceAtLeast(0.5f)
-                    // Hardware-calibrated 35ms sync delay: eliminates visual highlight drift
-                    val adjustedDelay = (35L / speed).toLong().coerceIn(0L, 70L)
-                    if (adjustedDelay > 0) delay(adjustedDelay)
-                    if (playbackState.token != activePlaybackToken) return@launch
-
-                    val absStart: Int
-                    val absEnd: Int
-
-                    if (spokenText == sentence.text) {
-                        absStart = sentence.start + start.coerceIn(0, sentence.text.length)
-                        absEnd = sentence.start + end.coerceIn(0, sentence.text.length)
-                    } else {
-                        // Normalization or translation: map proportional progress to original sentence words
-                        if (sentence.words.isNotEmpty()) {
-                            val progress = (start.toFloat() / spokenText.length.coerceAtLeast(1)).coerceIn(0f, 1f)
-                            val wordIdx = (progress * sentence.words.size).toInt().coerceIn(0, sentence.words.lastIndex)
-                            val word = sentence.words[wordIdx]
-                            absStart = word.start
-                            absEnd = word.end
-                        } else {
-                            val progress = (start.toFloat() / spokenText.length.coerceAtLeast(1)).coerceIn(0f, 1f)
-                            val charIdx = (progress * sentence.text.length).toInt().coerceIn(0, sentence.text.length)
-                            absStart = sentence.start + charIdx
-                            absEnd = sentence.start + (charIdx + (end - start)).coerceIn(charIdx, sentence.text.length)
-                        }
-                    }
-
-                    _currentWordRange.value = Pair(absStart, absEnd)
-                }
-            }
+            } }
         })
     }
 
     fun loadDocument(documentId: Long, sentencesList: List<SpeechSentence>, title: String, startSentenceIndex: Int = 0) {
+        stop()
+        resetTranslations()
+        _isCompleted.value = false
         this.documentId = documentId
         documentTitle = title
         sentences = sentencesList
@@ -447,13 +436,14 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
         _translatedSentences.value = emptyMap()
         totalCharacters = sentencesList.lastOrNull()?.end ?: 0
         _currentSentenceIndex.value = startSentenceIndex.coerceIn(0, maxOf(0, sentences.lastIndex))
-        _currentWordRange.value = null
         stop()
     }
 
     fun getSentences(): List<SpeechSentence> = sentences
 
     fun startPlayback() {
+        _playbackError.value = null
+        if (_isCompleted.value) { _currentSentenceIndex.value = 0; _isCompleted.value = false }
         if (!_isInitialized.value) {
             pendingStartPlayback = true
             return
@@ -466,14 +456,13 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
         } else {
             configureVoiceForTier(_selectedModelTier.value)
         }
-        restartPlaybackFromCurrentSentence()
+        if (_playbackError.value == null) restartPlaybackFromCurrentSentence()
     }
 
     fun pausePlayback() {
         resumeOnFocusGain = false
         invalidatePlaybackState(stopAudio = true)
         _isPlaying.value = false
-        _currentWordRange.value = null
         abandonAudioFocus()
     }
 
@@ -481,13 +470,12 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
         resumeOnFocusGain = false
         invalidatePlaybackState(stopAudio = true)
         _isPlaying.value = false
-        _currentWordRange.value = null
         stopPlaybackService()
         abandonAudioFocus()
     }
 
     fun setSpeed(speed: Float) {
-        val bounded = speed.coerceIn(0.5f, 4.5f)
+        val bounded = if (speed.isFinite()) speed.coerceIn(0.5f, 4.5f) else 1f
         _playbackSpeed.value = bounded
         tts?.setSpeechRate(bounded)
         if (_isPlaying.value) {
@@ -505,13 +493,21 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
 
     fun seekToSentence(index: Int) {
         if (sentences.isEmpty()) return
+        _isCompleted.value = false
         val targetIdx = index.coerceIn(0, sentences.lastIndex)
         val wasPlaying = _isPlaying.value
         invalidatePlaybackState(stopAudio = wasPlaying)
         _currentSentenceIndex.value = targetIdx
-        _currentWordRange.value = null
         if (wasPlaying) {
             restartPlaybackFromCurrentSentence()
+        } else {
+            val targetLang = _translationTargetLang.value
+            if (targetLang.isNotEmpty() && targetLang != "none") {
+                preparationJob = scope.launch {
+                    prepareSpokenText(targetIdx)
+                    prefetchTranslations(targetIdx + 1, count = 8)
+                }
+            }
         }
     }
 
@@ -538,64 +534,160 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
         seekToSentence(target)
     }
 
-    private suspend fun translateText(text: String, targetLang: String): String = withContext(Dispatchers.IO) {
-        if (!isNetworkAvailable()) {
-            Log.w("ReadoutTtsEngine", "No internet for translation, returning original text")
-            return@withContext text
-        }
+    private suspend fun translateText(text: String, targetLang: String, sourceDocumentId: Long): String? = withContext(Dispatchers.IO) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return@withContext ""
+        if (targetLang.isEmpty() || targetLang == "none") return@withContext null
 
-        val cacheKey = "$documentId|$targetLang|$text"
+        val cacheKey = "$sourceDocumentId|$targetLang|$trimmed"
         synchronized(translationCache) {
             translationCache[cacheKey]?.let { return@withContext it }
         }
 
-        val url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=$targetLang&dt=t&q=${java.net.URLEncoder.encode(text, "UTF-8")}"
-        val request = Request.Builder()
-            .url(url)
-            .header("User-Agent", "Mozilla/5.0")
-            .build()
-
-        try {
-            translationClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    Log.w("ReadoutTtsEngine", "Translation HTTP error: ${response.code}")
-                    return@withContext text
-                }
-                val body = response.body?.string() ?: return@withContext text
-                val jsonArray = JSONArray(body)
-                val firstArray = jsonArray.optJSONArray(0)
-                if (firstArray != null) {
-                    val result = StringBuilder()
-                    for (i in 0 until firstArray.length()) {
-                        val partArray = firstArray.optJSONArray(i)
-                        val translatedPart = partArray?.optString(0)
-                        if (!translatedPart.isNullOrEmpty()) {
-                            result.append(translatedPart)
-                        }
-                    }
-
-                    val translated = result.toString().ifBlank { text }
-                    synchronized(translationCache) {
-                        translationCache[cacheKey] = translated
-                        while (translationCache.size > 250) {
-                            val oldestKey = translationCache.entries.iterator().next().key
-                            translationCache.remove(oldestKey)
-                        }
-                    }
-                    return@withContext translated
-                }
-                text
-            }
-        } catch (e: Exception) {
-            Log.e("ReadoutTtsEngine", "Translation failed for language $targetLang", e)
-            text
+        if (!isNetworkAvailable()) {
+            Log.w("ReadoutTtsEngine", "No internet for translation")
+            return@withContext null
         }
+
+        // Tier 1: Google Translate Mobile Web (Unblocked by bot detection, resilient against 429)
+        try {
+            val encodedQuery = java.net.URLEncoder.encode(trimmed, "UTF-8")
+            val url = "https://translate.google.com/m?sl=auto&tl=$targetLang&q=$encodedQuery"
+            val request = Request.Builder()
+                .url(url)
+                .get()
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+                .build()
+
+            translationClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val html = response.body?.string()
+                    if (!html.isNullOrBlank()) {
+                        val doc = Jsoup.parse(html)
+                        val resultContainer = doc.selectFirst("div.result-container")
+                        val translated = resultContainer?.text()?.trim()
+                        if (!translated.isNullOrBlank()) {
+                            synchronized(translationCache) {
+                                translationCache[cacheKey] = translated
+                                while (translationCache.size > 300) {
+                                    val oldestKey = translationCache.entries.iterator().next().key
+                                    translationCache.remove(oldestKey)
+                                }
+                            }
+                            return@withContext translated
+                        }
+                    }
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("ReadoutTtsEngine", "Primary mobile web translation failed, trying API fallback", e)
+        }
+
+        // Tier 2: Google Translate (dict-chrome-ex client with form POST)
+        try {
+            val url = "https://translate.googleapis.com/translate_a/single?client=dict-chrome-ex&sl=auto&tl=$targetLang&dt=t"
+            val formBody = FormBody.Builder()
+                .add("q", trimmed)
+                .build()
+            val request = Request.Builder()
+                .url(url)
+                .post(formBody)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+                .header("Accept", "application/json, text/javascript, */*; q=0.01")
+                .build()
+
+            translationClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string()
+                    if (!body.isNullOrBlank() && body.startsWith("[")) {
+                        val jsonArray = JSONArray(body)
+                        val firstArray = jsonArray.optJSONArray(0)
+                        if (firstArray != null) {
+                            val result = StringBuilder()
+                            for (i in 0 until firstArray.length()) {
+                                val partArray = firstArray.optJSONArray(i)
+                                val translatedPart = partArray?.optString(0)
+                                if (!translatedPart.isNullOrEmpty()) {
+                                    result.append(translatedPart)
+                                }
+                            }
+                            val translated = result.toString().trim()
+                            if (translated.isNotEmpty()) {
+                                synchronized(translationCache) {
+                                    translationCache[cacheKey] = translated
+                                    while (translationCache.size > 300) {
+                                        val oldestKey = translationCache.entries.iterator().next().key
+                                        translationCache.remove(oldestKey)
+                                    }
+                                }
+                                return@withContext translated
+                            }
+                        }
+                    }
+                } else {
+                    Log.w("ReadoutTtsEngine", "Primary translation HTTP error ${response.code}, falling back to MyMemory")
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("ReadoutTtsEngine", "Primary translation failed, falling back to secondary", e)
+        }
+
+        // Tier 2: MyMemory API Fallback
+        try {
+            val encodedQuery = java.net.URLEncoder.encode(trimmed, "UTF-8")
+            val fallbackUrl = "https://api.mymemory.translated.net/get?q=$encodedQuery&langpair=autodetect|$targetLang"
+            val fallbackRequest = Request.Builder()
+                .url(fallbackUrl)
+                .get()
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14)")
+                .build()
+
+            translationClient.newCall(fallbackRequest).execute().use { fbResponse ->
+                if (fbResponse.isSuccessful) {
+                    val fbBody = fbResponse.body?.string()
+                    if (!fbBody.isNullOrBlank() && fbBody.startsWith("{")) {
+                        val json = JSONObject(fbBody)
+                        val status = json.optInt("responseStatus", json.optString("responseStatus").toIntOrNull() ?: 0)
+                        if (status == 200) {
+                            val responseData = json.optJSONObject("responseData")
+                            val transText = responseData?.optString("translatedText")
+                            if (!transText.isNullOrBlank() &&
+                                !transText.contains("MYMEMORY WARNING", ignoreCase = true) &&
+                                !transText.contains("PLEASE SELECT", ignoreCase = true) &&
+                                !transText.contains("QUERY LENGTH", ignoreCase = true)) {
+                                val cleanTrans = Parser.unescapeEntities(transText, false).trim()
+                                if (cleanTrans.isNotEmpty()) {
+                                    synchronized(translationCache) {
+                                        translationCache[cacheKey] = cleanTrans
+                                        while (translationCache.size > 300) {
+                                            val oldestKey = translationCache.entries.iterator().next().key
+                                            translationCache.remove(oldestKey)
+                                        }
+                                    }
+                                    return@withContext cleanTrans
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e("ReadoutTtsEngine", "Secondary translation fallback also failed for language $targetLang", e)
+        }
+
+        null
     }
 
     private fun configureVoiceForLanguage(langCode: String) {
         val currentTts = tts ?: return
         if (langCode.isEmpty() || langCode == "none") {
-            configureVoiceForTier(_selectedModelTier.value, preferredLocale = Locale.US)
+            configureVoiceForTier(_selectedModelTier.value, preferredLocale = Locale.getDefault())
             return
         }
 
@@ -611,9 +703,9 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
         }
         if (available.isNullOrEmpty()) return
 
-        val localeVoices = available.filter { isLanguageMatch(it.locale, targetLocale) }
+        val localeVoices = available.filter { isLanguageMatch(it.locale, targetLocale) && eligibleVoice(it) }
         if (localeVoices.isEmpty()) {
-            Log.w("ReadoutTtsEngine", "No voices found for language $langCode, falling back to setLanguage only")
+            failPlayback("No installed voice for $langCode. Install a voice or allow online voices in Settings.")
             return
         }
 
@@ -629,11 +721,13 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
 
     private fun startPlaybackAtSentence(index: Int) {
         if (!_isInitialized.value || sentences.isEmpty() || index !in sentences.indices) return
-        requestAudioFocus()
+        if (!requestAudioFocus()) {
+            failPlayback("Another app is using audio. Try again when it finishes.")
+            return
+        }
         invalidatePlaybackState(stopAudio = true)
         _isPlaying.value = true
         _currentSentenceIndex.value = index
-        _currentWordRange.value = null
 
         val token = activePlaybackToken
         applyCurrentVoiceAndRate()
@@ -654,70 +748,95 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
 
     private fun enqueueSentencesUpTo(targetMaxIndex: Int, playbackToken: Long) {
         if (playbackToken != activePlaybackToken || !_isPlaying.value) return
-        scope.launch {
-            enqueueMutex.withLock {
-                if (playbackToken != activePlaybackToken || !_isPlaying.value) return@withLock
-                val start = if (highestQueuedIndex < 0) {
-                    _currentSentenceIndex.value
-                } else {
-                    highestQueuedIndex + 1
+        // One producer owns the queue. onStart extends its target without cancelling it.
+        requestedQueueEnd = maxOf(requestedQueueEnd, targetMaxIndex.coerceAtMost(sentences.lastIndex))
+        if (queueJob?.isActive == true) return
+        queueJob = scope.launch {
+            while (playbackToken == activePlaybackToken && _isPlaying.value) {
+                val index = if (highestQueuedIndex < 0) _currentSentenceIndex.value else highestQueuedIndex + 1
+                if (index > requestedQueueEnd) break
+                val spoken = prepareSpokenText(index)
+                if (playbackToken != activePlaybackToken || !_isPlaying.value) return@launch
+                if (spoken == null) {
+                    failPlayback("Translation unavailable. Retry or turn translation off to read the original.")
+                    return@launch
                 }
-                val end = targetMaxIndex.coerceAtMost(sentences.lastIndex)
-                if (start > end) return@withLock
-
-                for (i in start..end) {
-                    if (playbackToken != activePlaybackToken || !_isPlaying.value) return@withLock
-                    val textToSpeak = prepareSpokenText(i)
-                    if (playbackToken != activePlaybackToken || !_isPlaying.value) return@withLock
-
-                    val isFirstInStream = (highestQueuedIndex < 0)
-                    val queueMode = if (isFirstInStream) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-                    val utteranceId = buildUtteranceId(playbackToken, i)
-                    val params = android.os.Bundle().apply {
-                        putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
+                val target = _translationTargetLang.value
+                if (target != "none" && target.isNotEmpty()) configureVoiceForLanguage(target)
+                val chunks = SpeechChunks.split(spoken, TextToSpeech.getMaxSpeechInputLength() - 1)
+                for ((chunkIndex, chunk) in chunks.withIndex()) {
+                    val first = highestQueuedIndex < 0 && chunkIndex == 0
+                    val id = "$playbackToken:$index:${chunkIndex == chunks.lastIndex}"
+                    val result = tts?.speak(chunk, if (first) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, id)
+                    if (result != TextToSpeech.SUCCESS) {
+                        failPlayback("The speech engine rejected this text. Choose another voice and retry.")
+                        return@launch
                     }
-                    highestQueuedIndex = i
-                    val res = tts?.speak(textToSpeak, queueMode, params, utteranceId)
-                    Log.d("ReadoutTtsEngine", "Enqueued sentence $i (mode=${if (queueMode == TextToSpeech.QUEUE_FLUSH) "FLUSH" else "ADD"}, res=$res): ${textToSpeak.take(40)}")
+                }
+                highestQueuedIndex = index
+                if (index == _currentSentenceIndex.value) {
+                    watchdogJob?.cancel()
+                    watchdogJob = scope.launch {
+                        delay(15000)
+                        if (playbackToken == activePlaybackToken && _isPlaying.value && !ttsIsSpeaking()) {
+                            failPlayback("Speech did not start. Check your voice settings and retry.")
+                        }
+                    }
                 }
             }
         }
     }
 
-    private suspend fun prepareSpokenText(index: Int): String {
-        val cached = spokenSentenceTextMap[index]
-        if (cached != null) return cached
+    private var requestedQueueEnd = -1
+    private fun ttsIsSpeaking() = tts?.isSpeaking == true
 
-        val sentence = sentences.getOrNull(index) ?: return ""
-        val targetLang = _translationTargetLang.value
-        val rawText = if (targetLang.isNotEmpty() && targetLang != "none") {
-            val translated = translateText(sentence.text, targetLang)
-            _translatedSentences.update { it + (index to translated) }
-            translated
-        } else {
-            sentence.text
+    private suspend fun prepareSpokenText(index: Int): String? {
+        val generation = translationGeneration
+        val sourceId = documentId
+        val target = _translationTargetLang.value
+        val key = "$sourceId|$index|$target"
+        if (target in listOf("", "none")) spokenSentenceTextMap[key]?.let { return it }
+        else _translatedSentences.value[index]?.let { return SpokenTextNormalizer.normalizeForSpeech(it, target) }
+        val sentence = sentences.getOrNull(index) ?: return null
+        val translated = if (target.isNotEmpty() && target != "none") {
+            val parts = mutableListOf<String>()
+            for (part in SpeechChunks.splitUtf8(sentence.text, 480)) {
+                val result = if (translator != null) translator.invoke(part, target) else translateText(part, target, sourceId)
+                currentCoroutineContext().ensureActive()
+                if (generation != translationGeneration || sourceId != documentId) return null
+                if (result.isNullOrBlank()) {
+                    _translationErrors.value = _translationErrors.value + (index to "Translation unavailable. Tap to retry.")
+                    return null
+                }
+                parts.add(result)
+            }
+            parts.joinToString(" ")
+        } else null
+        currentCoroutineContext().ensureActive()
+        if (generation != translationGeneration || sourceId != documentId) return null
+        if (translated != null) {
+            _translatedSentences.value = (_translatedSentences.value + (index to translated)).filterKeys { it in (index - 40)..(index + 80) }
+            _translationErrors.value = _translationErrors.value - index
         }
-        val textToSpeak = SpokenTextNormalizer.normalizeForSpeech(rawText)
-        spokenSentenceTextMap[index] = textToSpeak
-        if (spokenSentenceTextMap.size > 128) {
-            val minKeep = (index - 32).coerceAtLeast(0)
-            val maxKeep = index + 64
-            spokenSentenceTextMap.keys.retainAll { it in minKeep..maxKeep }
-        }
-        return textToSpeak
+        val language = if (translated != null) target else (tts?.voice?.locale?.language ?: Locale.getDefault().language)
+        val spoken = SpokenTextNormalizer.normalizeForSpeech(translated ?: sentence.text, language)
+        if (spokenSentenceTextMap.size >= 128) spokenSentenceTextMap.clear()
+        spokenSentenceTextMap[key] = spoken
+        return spoken
     }
 
-    private fun prefetchTranslationsAhead(fromIndex: Int) {
-        val targetLang = _translationTargetLang.value
-        if (targetLang.isEmpty() || targetLang == "none") return
-        scope.launch(Dispatchers.IO) {
-            for (idx in fromIndex until minOf(fromIndex + 4, sentences.size)) {
-                if (!spokenSentenceTextMap.containsKey(idx)) {
-                    prepareSpokenText(idx)
-                }
+    fun prefetchTranslations(fromIndex: Int, count: Int = 10) {
+        if (_translationTargetLang.value in listOf("", "none")) return
+        translationPrefetchJob?.cancel()
+        translationPrefetchJob = scope.launch {
+            for (index in fromIndex.coerceAtLeast(0) until minOf(fromIndex + count, sentences.size)) {
+                if (prepareSpokenText(index) == null) break
+                delay(100)
             }
         }
     }
+
+    private fun prefetchTranslationsAhead(fromIndex: Int) = prefetchTranslations(fromIndex, 4)
 
     private fun startPlaybackService() {
         val intent = Intent(context, com.iefan.readout.service.PlaybackService::class.java).apply {
@@ -735,8 +854,9 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
     }
 
     fun startSleepTimer(minutes: Int) {
-        _sleepTimerMinutes.value = minutes
-        _sleepTimerRemainingSeconds.value = minutes * 60
+        val boundedMinutes = minutes.coerceIn(0, 1440)
+        _sleepTimerMinutes.value = boundedMinutes
+        _sleepTimerRemainingSeconds.value = boundedMinutes * 60
         timerJob?.cancel()
 
         if (minutes == 0) {
@@ -770,8 +890,11 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
         if (available.isNullOrEmpty()) return
 
         val currentLocale = preferredLocale ?: currentTts.voice?.locale ?: Locale.US
-        val localeVoices = available.filter { isLanguageMatch(it.locale, currentLocale) }
-        if (localeVoices.isEmpty()) return
+        val localeVoices = available.filter { isLanguageMatch(it.locale, currentLocale) && eligibleVoice(it) }
+        if (localeVoices.isEmpty()) {
+            failPlayback("No installed voice is available for this language. Install one in Android speech settings.")
+            return
+        }
 
         var selectedVoice = localeVoices.firstOrNull { it.name == targetVoiceId }
         if (selectedVoice != null) {
@@ -811,10 +934,11 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
 
     private fun invalidatePlaybackState(stopAudio: Boolean) {
         activePlaybackToken = playbackTokenCounter.incrementAndGet()
+        queueJob?.cancel()
+        queueJob = null
+        requestedQueueEnd = -1
         watchdogJob?.cancel()
         watchdogJob = null
-        wordHighlightJob?.cancel()
-        wordHighlightJob = null
         highestQueuedIndex = -1
         if (stopAudio) {
             tts?.stop()
@@ -843,12 +967,16 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
 
     private fun parseUtteranceId(utteranceId: String?): PlaybackState? {
         val raw = utteranceId ?: return null
-        val parts = raw.split(':', limit = 2)
-        if (parts.size != 2) return null
+        val parts = raw.split(':')
+        if (parts.size < 2) return null
         val token = parts[0].toLongOrNull() ?: return null
         val sentenceIndex = parts[1].toIntOrNull() ?: return null
-        return PlaybackState(token, sentenceIndex)
+        return PlaybackState(token, sentenceIndex, parts.getOrNull(2) != "false")
     }
+
+    private fun eligibleVoice(voice: Voice): Boolean =
+        voice.features?.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) != true &&
+        (!voice.isNetworkConnectionRequired || (!offlineOnly && isNetworkAvailable()))
 
     private fun scoreVoice(voice: Voice, targetLocale: Locale, hasInternet: Boolean): Int {
         val isNotInstalled = voice.features != null &&
@@ -942,8 +1070,7 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val network = connectivityManager.activeNetwork ?: return false
             val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
-            return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
         }
 
         @Suppress("DEPRECATION")
@@ -1112,6 +1239,7 @@ class ReadoutTtsEngine(private val context: Context) : TextToSpeech.OnInitListen
 
     private data class PlaybackState(
         val token: Long,
-        val sentenceIndex: Int
+        val sentenceIndex: Int,
+        val lastChunk: Boolean = true
     )
 }

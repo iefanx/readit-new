@@ -58,16 +58,18 @@ fun EditBookDetailsDialog(
                 null
             } else if (selectedUri != null) {
                 try {
-                    context.contentResolver.openInputStream(selectedUri!!)?.use { input ->
-                        BitmapFactory.decodeStream(input)?.asImageBitmap()
-                    }
+                    com.iefan.readout.utils.BitmapOptimizer
+                        .decodeSampledBitmapFromUri(context, selectedUri!!, 240, 360)
+                        ?.asImageBitmap()
                 } catch (e: Exception) {
                     null
                 }
             } else {
                 document.coverPath?.let { path ->
                     try {
-                        BitmapFactory.decodeFile(path)?.asImageBitmap()
+                        com.iefan.readout.utils.BitmapOptimizer
+                            .decodeSampledBitmapFromFile(path, 240, 360)
+                            ?.asImageBitmap()
                     } catch (e: Exception) {
                         null
                     }

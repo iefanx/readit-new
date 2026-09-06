@@ -52,7 +52,9 @@ object SpokenTextNormalizer {
     private val AMPERSAND_REGEX = Regex("""(?<=\w)\s*&\s*(?=\w)""")
     private val PLUS_SIGN_REGEX = Regex("""(?<=\w)\s*\+\s*(?=\w)""")
 
-    fun normalizeForSpeech(rawText: String): String {
+    @JvmOverloads
+    fun normalizeForSpeech(rawText: String, language: String = "en"): String {
+        if (language.substringBefore('-') != "en") return rawText.replace(Regex("\\s+"), " ").trim()
         if (rawText.isBlank()) return rawText
         var text = rawText
 
@@ -67,7 +69,7 @@ object SpokenTextNormalizer {
         text = text.replace(EM_DASH_REGEX, ", ")
         text = text.replace(ELLIPSIS_REGEX, ", ")
         text = text.replace(Regex("""(?<=\w)\s*;\s*(?=\w)"""), ", ")
-        text = text.replace(Regex("""(?<=\w)\s*:\s*(?=\w)"""), ", ")
+        // Preserve times, ratios, decimals and dotted abbreviations.
 
         // 3. Spoken abbreviations expansion for effortless prosody
         text = text.replace(Regex("""\bDr\.\s*([A-Z])"""), "Doctor $1")
@@ -146,7 +148,6 @@ object SpokenTextNormalizer {
         text = text.replace(Regex(""",\s*,"""), ", ")
         text = text.replace(Regex(""",\s*([.!?])"""), "$1")
         text = text.replace(Regex(""",\s*$"""), ".")
-        text = text.replace(Regex("""([,;:.!?])(?=[^\s,;:.!?])"""), "$1 ")
         text = text.replace(Regex("""\s+"""), " ").trim()
 
         return text

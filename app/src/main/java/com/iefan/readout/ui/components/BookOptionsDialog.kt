@@ -69,7 +69,7 @@ fun BookOptionsDialog(
                     value = withContext(Dispatchers.IO) {
                         document.coverPath?.let { path ->
                             try {
-                                BitmapFactory.decodeFile(path)?.asImageBitmap()
+                                com.iefan.readout.utils.BitmapOptimizer.decodeSampledBitmapFromFile(path, 180, 240)?.asImageBitmap()
                             } catch (e: Exception) {
                                 null
                             }

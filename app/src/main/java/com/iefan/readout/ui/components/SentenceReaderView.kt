@@ -32,17 +32,21 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Sync
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import com.iefan.readout.tts.SpeechSentence
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun KaraokeView(
+fun SentenceReaderView(
     sentences: List<SpeechSentence>,
     activeSentenceIndex: Int,
-    currentWordRange: Pair<Int, Int>?,
     isPlaying: Boolean,
     isTranslating: Boolean = false,
     translatedSentences: Map<Int, String> = emptyMap(),
+    translationErrors: Map<Int, String> = emptyMap(),
+    onRetryTranslation: (Int) -> Unit = {},
     onSentenceJump: (Int) -> Unit,
     onLongPressBookmark: (sentenceIndex: Int, sentenceText: String) -> Unit = { _, _ -> },
     showResyncButton: Boolean = true,
@@ -69,68 +73,45 @@ fun KaraokeView(
         }
     }
 
-    fun scrollToSentence(targetIndex: Int) {
-        coroutineScope.launch {
-            if (targetIndex !in sentences.indices) return@launch
-            val layoutInfo = listState.layoutInfo
-            val viewportHeight = layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset
-            val targetTopPx = if (viewportHeight > 0) (viewportHeight * 0.10f).toInt() else 100
-
-            val activeItem = layoutInfo.visibleItemsInfo.firstOrNull { it.index == targetIndex }
-            if (activeItem != null) {
-                val delta = (activeItem.offset - targetTopPx).toFloat()
-                if (kotlin.math.abs(delta) > 8f) {
-                    listState.animateScrollBy(delta)
-                }
-            } else {
-                listState.scrollToItem(targetIndex, -targetTopPx)
-                kotlinx.coroutines.delay(16)
-                val updated = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == targetIndex }
-                if (updated != null) {
-                    val delta = (updated.offset - targetTopPx).toFloat()
-                    if (kotlin.math.abs(delta) > 8f) {
-                        listState.animateScrollBy(delta)
-                    }
-                }
-            }
+    // Follow only sentence changes and geometry changes, never per-word callbacks.
+    suspend fun alignSentence() {
+        if (activeSentenceIndex !in sentences.indices) return
+        val info = listState.layoutInfo
+        val target = ((info.viewportEndOffset - info.viewportStartOffset) * 0.10f).toInt()
+        val item = info.visibleItemsInfo.firstOrNull { it.index == activeSentenceIndex }
+        if (item == null) {
+            listState.animateScrollToItem(activeSentenceIndex, -target)
+        } else {
+            val distance = (item.offset - target).toFloat()
+            if (kotlin.math.abs(distance) > 2f) listState.animateScrollBy(distance, tween(350, easing = FastOutSlowInEasing))
         }
     }
 
-    // High-reliability auto-scroll: smoothly positions active sentence ~10% from viewport top
-    LaunchedEffect(activeSentenceIndex, autoFollowEnabled) {
-        if (!autoFollowEnabled || activeSentenceIndex !in sentences.indices || isUserDragging) return@LaunchedEffect
-
-        val layoutInfo = listState.layoutInfo
-        val viewportHeight = layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset
-        val targetTopPx = if (viewportHeight > 0) (viewportHeight * 0.10f).toInt() else 100
-
-        val activeItem = layoutInfo.visibleItemsInfo.firstOrNull { it.index == activeSentenceIndex }
-        if (activeItem != null) {
-            val delta = (activeItem.offset - targetTopPx).toFloat()
-            if (kotlin.math.abs(delta) > 8f) {
-                listState.animateScrollBy(delta)
-            }
-        } else {
-            listState.scrollToItem(activeSentenceIndex, -targetTopPx)
-            kotlinx.coroutines.delay(16)
-            val updated = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == activeSentenceIndex }
-            if (updated != null) {
-                val delta = (updated.offset - targetTopPx).toFloat()
-                if (kotlin.math.abs(delta) > 8f) {
-                    listState.animateScrollBy(delta)
-                }
-            }
+    LaunchedEffect(activeSentenceIndex, autoFollowEnabled, isUserDragging) {
+        if (!autoFollowEnabled || isUserDragging) return@LaunchedEffect
+        snapshotFlow {
+            val info = listState.layoutInfo
+            Pair(info.viewportEndOffset - info.viewportStartOffset,
+                info.visibleItemsInfo.map { it.index to it.size })
+        }.distinctUntilChanged().collectLatest {
+            withFrameNanos { }
+            alignSentence()
         }
     }
 
     val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
 
-    // Subtle micro-haptic tick when playback transitions to a new sentence
-    LaunchedEffect(activeSentenceIndex) {
-        if (isPlaying && activeSentenceIndex > 0) {
-            try {
-                haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
-            } catch (_: Exception) {}
+    if (isTranslating) {
+        LaunchedEffect(listState) {
+            snapshotFlow { listState.firstVisibleItemIndex }
+                .distinctUntilChanged()
+                .collectLatest { index ->
+                    delay(300)
+                    com.iefan.readout.tts.ReadoutTtsEngine.instance?.prefetchTranslations(
+                        index,
+                        count = 6
+                    )
+                }
         }
     }
 
@@ -155,7 +136,7 @@ fun KaraokeView(
                 state = listState,
                 contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 220.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
-                modifier = Modifier.fillMaxSize().testTag("karaoke_scroller")
+                modifier = Modifier.fillMaxSize().testTag("sentence_scroller")
             ) {
                 // key = s.start ensures stable item identity across document changes,
                 // preventing full relayout when a new book is loaded.
@@ -187,31 +168,31 @@ fun KaraokeView(
                                 onLongClick = { onLongPressBookmark(idx, sentence.text) }
                             )
                             .padding(
-                                horizontal = if (isActive) 14.dp else 4.dp,
-                                vertical = if (isActive) 12.dp else 6.dp
+                                horizontal = 14.dp,
+                                vertical = 12.dp
                             )
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.Top
                         ) {
-                            if (isActive) {
+                            run {
                                 Box(
                                     modifier = Modifier
                                         .padding(top = 6.dp, end = 10.dp)
                                         .width(3.5.dp)
                                         .height(20.dp)
                                         .clip(RoundedCornerShape(2.dp))
-                                        .background(primaryColor)
+                                        .background(if (isActive) primaryColor else Color.Transparent)
                                 )
                             }
                             Column(modifier = Modifier.weight(1f)) {
                                 val textColor = if (isActive) {
                                     Color.White
                                 } else if (idx < activeSentenceIndex) {
-                                    Color.White.copy(alpha = 0.42f)
+                                    Color.White.copy(alpha = 0.72f)
                                 } else {
-                                    Color.White.copy(alpha = 0.30f)
+                                    Color.White.copy(alpha = 0.82f)
                                 }
 
                                 Text(
@@ -221,24 +202,38 @@ fun KaraokeView(
                                         lineHeight = 32.sp,
                                         fontSize = 19.sp,
                                         letterSpacing = 0.18.sp,
-                                        fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal
+                                        fontWeight = FontWeight.Normal
                                     ),
                                     color = textColor
                                 )
 
-                                val translated = translatedSentences[idx]
-                                if (isTranslating && !translated.isNullOrBlank()) {
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                    Text(
-                                        text = translated,
-                                        style = MaterialTheme.typography.bodyMedium.copy(
-                                            fontFamily = androidx.compose.ui.text.font.FontFamily.SansSerif,
-                                            lineHeight = 24.sp,
-                                            fontSize = 16.sp
-                                        ),
-                                        color = if (isActive) primaryColor.copy(alpha = 0.95f) else Color.White.copy(alpha = 0.35f)
-                                    )
-                                }
+                                 val translated = translatedSentences[idx]
+                                 if (isTranslating) {
+                                     if (!translated.isNullOrBlank() && translated.trim() != sentence.text.trim()) {
+                                         Spacer(modifier = Modifier.height(6.dp))
+                                         Text(
+                                             text = translated,
+                                             style = MaterialTheme.typography.bodyMedium.copy(
+                                                 fontFamily = androidx.compose.ui.text.font.FontFamily.SansSerif,
+                                                 lineHeight = 24.sp,
+                                                 fontSize = 16.sp
+                                             ),
+                                             color = if (isActive) primaryColor.copy(alpha = 0.95f) else Color.White.copy(alpha = 0.35f)
+                                         )
+                                     } else if (isActive && translated == null) {
+                                         Spacer(modifier = Modifier.height(4.dp))
+                                         Text(
+                                             text = translationErrors[idx] ?: "Translating...",
+                                             modifier = Modifier.combinedClickable(onClick = { onRetryTranslation(idx) }),
+                                             style = MaterialTheme.typography.bodySmall.copy(
+                                                 fontFamily = androidx.compose.ui.text.font.FontFamily.SansSerif,
+                                                 fontSize = 13.sp,
+                                                 fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+                                             ),
+                                             color = primaryColor.copy(alpha = 0.6f)
+                                         )
+                                     }
+                                 }
                             }
                         }
                     }
@@ -287,7 +282,7 @@ fun KaraokeView(
                             haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
                         } catch (_: Exception) {}
                         autoFollowEnabled = true
-                        scrollToSentence(activeSentenceIndex)
+                        coroutineScope.launch { alignSentence() }
                     },
                     shape = CircleShape,
                     color = MaterialTheme.colorScheme.primary,
