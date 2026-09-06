@@ -73,29 +73,48 @@ fun SentenceReaderView(
         }
     }
 
-    // Follow only sentence changes and geometry changes, never per-word callbacks.
-    suspend fun alignSentence() {
-        if (activeSentenceIndex !in sentences.indices) return
-        val info = listState.layoutInfo
-        val target = ((info.viewportEndOffset - info.viewportStartOffset) * 0.10f).toInt()
-        val item = info.visibleItemsInfo.firstOrNull { it.index == activeSentenceIndex }
-        if (item == null) {
-            listState.animateScrollToItem(activeSentenceIndex, -target)
+    // Instant jump for offscreen / distant targets (cold-start resume, chapter jump, bookmark, scrub).
+    // Smooth scroll ONLY for immediate adjacent sentence during continuous playback.
+    suspend fun scrollToSentence(targetIndex: Int, animateIfNearby: Boolean = true) {
+        if (targetIndex !in sentences.indices) return
+        val layoutInfo = listState.layoutInfo
+        val viewportHeight = layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset
+        val targetTopPx = if (viewportHeight > 0) (viewportHeight * 0.10f).toInt() else 100
+
+        val activeItem = layoutInfo.visibleItemsInfo.firstOrNull { it.index == targetIndex }
+        if (activeItem != null && animateIfNearby && kotlin.math.abs(activeItem.index - targetIndex) <= 1) {
+            val delta = (activeItem.offset - targetTopPx).toFloat()
+            if (kotlin.math.abs(delta) > 4f) {
+                listState.animateScrollBy(delta, tween(250, easing = FastOutSlowInEasing))
+            }
         } else {
-            val distance = (item.offset - target).toFloat()
-            if (kotlin.math.abs(distance) > 2f) listState.animateScrollBy(distance, tween(350, easing = FastOutSlowInEasing))
+            listState.scrollToItem(targetIndex, -targetTopPx)
+            val updated = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == targetIndex }
+            if (updated != null) {
+                val delta = (updated.offset - targetTopPx).toFloat()
+                if (kotlin.math.abs(delta) > 8f) {
+                    listState.animateScrollBy(delta, tween(150, easing = FastOutSlowInEasing))
+                }
+            }
         }
     }
 
-    LaunchedEffect(activeSentenceIndex, autoFollowEnabled, isUserDragging) {
-        if (!autoFollowEnabled || isUserDragging) return@LaunchedEffect
-        snapshotFlow {
-            val info = listState.layoutInfo
-            Pair(info.viewportEndOffset - info.viewportStartOffset,
-                info.visibleItemsInfo.map { it.index to it.size })
-        }.distinctUntilChanged().collectLatest {
-            withFrameNanos { }
-            alignSentence()
+    LaunchedEffect(activeSentenceIndex, sentences.isNotEmpty(), autoFollowEnabled) {
+        if (!autoFollowEnabled || isUserDragging || activeSentenceIndex !in sentences.indices) return@LaunchedEffect
+        scrollToSentence(activeSentenceIndex, animateIfNearby = true)
+    }
+
+    val activeTranslation = translatedSentences[activeSentenceIndex]
+    LaunchedEffect(activeTranslation) {
+        if (!autoFollowEnabled || isUserDragging || activeSentenceIndex !in sentences.indices) return@LaunchedEffect
+        val activeItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == activeSentenceIndex }
+        if (activeItem != null) {
+            val viewportHeight = listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset
+            val targetTopPx = if (viewportHeight > 0) (viewportHeight * 0.10f).toInt() else 100
+            val delta = (activeItem.offset - targetTopPx).toFloat()
+            if (kotlin.math.abs(delta) > 6f) {
+                listState.animateScrollBy(delta, tween(200, easing = FastOutSlowInEasing))
+            }
         }
     }
 
@@ -282,7 +301,7 @@ fun SentenceReaderView(
                             haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
                         } catch (_: Exception) {}
                         autoFollowEnabled = true
-                        coroutineScope.launch { alignSentence() }
+                        coroutineScope.launch { scrollToSentence(activeSentenceIndex, animateIfNearby = false) }
                     },
                     shape = CircleShape,
                     color = MaterialTheme.colorScheme.primary,
